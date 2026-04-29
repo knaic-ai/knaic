@@ -1,0 +1,11 @@
+# Top-level safety net — each subproject also has its own .gitignore.
+node_modules/
+dist/
+bin/
+build/
+.tmp/
+.env
+.env.local
+.DS_Store
+*.swp
+*.tsbuildinfo

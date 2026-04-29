@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kserve
+description: KServe model inference platform (knaic stub chart).
+type: application
+version: 0.14.0
+appVersion: "0.14.0"
