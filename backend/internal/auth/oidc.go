@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"slices"
@@ -13,22 +14,31 @@ import (
 type Verifier struct {
 	v          *oidc.IDTokenVerifier
 	adminGroup string
+	client     *http.Client
 	disabled   bool
 }
 
 // New builds a verifier. If issuer is empty and disabled is true, returns a
 // dev-mode verifier that injects a fake admin user.
-func New(ctx context.Context, issuer, clientID, adminGroup string, disabled bool) (*Verifier, error) {
+func New(
+	ctx context.Context,
+	issuer, clientID, adminGroup string,
+	insecureSkipVerify, disabled bool,
+) (*Verifier, error) {
 	if disabled {
 		return &Verifier{adminGroup: adminGroup, disabled: true}, nil
 	}
-	provider, err := oidc.NewProvider(ctx, issuer)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecureSkipVerify}
+	client := &http.Client{Transport: transport}
+	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc provider init: %w", err)
 	}
 	return &Verifier{
 		v:          provider.Verifier(&oidc.Config{ClientID: clientID}),
 		adminGroup: adminGroup,
+		client:     client,
 	}, nil
 }
 
@@ -60,7 +70,8 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
-		tok, err := v.v.Verify(r.Context(), raw)
+		verifyCtx := oidc.ClientContext(r.Context(), v.client)
+		tok, err := v.v.Verify(verifyCtx, raw)
 		if err != nil {
 			http.Error(w, "invalid token: "+err.Error(), http.StatusUnauthorized)
 			return

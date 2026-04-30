@@ -39,7 +39,14 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	verifier, err := auth.New(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCAdminGroup, cfg.AuthDisabled)
+	verifier, err := auth.New(
+		ctx,
+		cfg.OIDCIssuer,
+		cfg.OIDCClientID,
+		cfg.OIDCAdminGroup,
+		cfg.OIDCInsecureSkipVerify,
+		cfg.AuthDisabled,
+	)
 	if err != nil {
 		log.Error("oidc init", "err", err)
 		os.Exit(1)

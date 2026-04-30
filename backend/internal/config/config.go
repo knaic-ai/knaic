@@ -12,10 +12,11 @@ type Config struct {
 	SystemNamespace string
 	KubeconfigPath  string
 
-	OIDCIssuer     string
-	OIDCClientID   string
-	OIDCAdminGroup string
-	AuthDisabled   bool
+	OIDCIssuer             string
+	OIDCClientID           string
+	OIDCAdminGroup         string
+	OIDCInsecureSkipVerify bool
+	AuthDisabled           bool
 
 	RegistryEndpoint string
 	RegistryProject  string
@@ -30,19 +31,20 @@ type Config struct {
 
 func Load() (*Config, error) {
 	c := &Config{
-		Addr:             env("KNAIC_ADDR", ":8080"),
-		SystemNamespace:  env("KNAIC_SYSTEM_NAMESPACE", "knaic-system"),
-		KubeconfigPath:   env("KUBECONFIG", ""),
-		OIDCIssuer:       env("KNAIC_OIDC_ISSUER", ""),
-		OIDCClientID:     env("KNAIC_OIDC_CLIENT_ID", "knaic"),
-		OIDCAdminGroup:   env("KNAIC_OIDC_ADMIN_GROUP", "knaic:platform-admins"),
-		AuthDisabled:     boolEnv("KNAIC_AUTH_DISABLED", false),
-		RegistryEndpoint: env("KNAIC_REGISTRY_ENDPOINT", "registry.knaic.local"),
-		RegistryProject:  env("KNAIC_REGISTRY_PROJECT", "components"),
-		RegistryUseEmbed: boolEnv("KNAIC_REGISTRY_USE_EMBED", true),
-		DatabaseURL:      env("KNAIC_DB_URL", ""),
-		PrometheusURL:    env("KNAIC_PROMETHEUS_URL", ""),
-		CORSOrigins:      splitCSV(env("KNAIC_CORS_ORIGINS", "http://localhost:4300,http://localhost:5173")),
+		Addr:                   env("KNAIC_ADDR", ":8080"),
+		SystemNamespace:        env("KNAIC_SYSTEM_NAMESPACE", "knaic-system"),
+		KubeconfigPath:         env("KUBECONFIG", ""),
+		OIDCIssuer:             env("KNAIC_OIDC_ISSUER", ""),
+		OIDCClientID:           env("KNAIC_OIDC_CLIENT_ID", "knaic"),
+		OIDCAdminGroup:         env("KNAIC_OIDC_ADMIN_GROUP", "knaic:platform-admins"),
+		OIDCInsecureSkipVerify: boolEnv("KNAIC_OIDC_INSECURE_SKIP_VERIFY", true),
+		AuthDisabled:           boolEnv("KNAIC_AUTH_DISABLED", false),
+		RegistryEndpoint:       env("KNAIC_REGISTRY_ENDPOINT", "registry.knaic.local"),
+		RegistryProject:        env("KNAIC_REGISTRY_PROJECT", "components"),
+		RegistryUseEmbed:       boolEnv("KNAIC_REGISTRY_USE_EMBED", true),
+		DatabaseURL:            env("KNAIC_DB_URL", ""),
+		PrometheusURL:          env("KNAIC_PROMETHEUS_URL", ""),
+		CORSOrigins:            splitCSV(env("KNAIC_CORS_ORIGINS", "http://localhost:4300,http://localhost:5173")),
 	}
 	if !c.AuthDisabled && c.OIDCIssuer == "" {
 		return nil, fmt.Errorf("KNAIC_OIDC_ISSUER is required unless KNAIC_AUTH_DISABLED=true")

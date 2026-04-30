@@ -69,6 +69,10 @@ export KUBECONFIG=$HOME/.kube/config
 make build && ./bin/knaic-api
 ```
 
+OIDC issuer discovery and JWKS fetch skip TLS verification by default. Set
+`KNAIC_OIDC_INSECURE_SKIP_VERIFY=false` to require normal certificate
+validation.
+
 ### Configuration
 
 | Env var | Default | Notes |
@@ -79,6 +83,7 @@ make build && ./bin/knaic-api
 | `KNAIC_OIDC_ISSUER` | _(required unless disabled)_ | Dex / OIDC issuer URL |
 | `KNAIC_OIDC_CLIENT_ID` | `knaic` | OIDC client ID |
 | `KNAIC_OIDC_ADMIN_GROUP` | `knaic:platform-admins` | group claim that grants platform-admin |
+| `KNAIC_OIDC_INSECURE_SKIP_VERIFY` | `true` | skip TLS verification for OIDC discovery and JWKS fetches |
 | `KNAIC_AUTH_DISABLED` | `false` | dev only — injects a fake admin |
 | `KNAIC_REGISTRY_ENDPOINT` | `registry.knaic.local` | mirrored image registry host |
 | `KNAIC_REGISTRY_PROJECT` | `components` | path under the registry |
