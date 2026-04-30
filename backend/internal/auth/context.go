@@ -3,11 +3,11 @@ package auth
 import "context"
 
 type User struct {
-	Subject         string
-	Email           string
-	Name            string
-	Groups          []string
-	IsPlatformAdmin bool
+	Subject         string   `json:"subject"`
+	Email           string   `json:"email"`
+	Name            string   `json:"name"`
+	Groups          []string `json:"groups"`
+	IsPlatformAdmin bool     `json:"isPlatformAdmin"`
 }
 
 type ctxKey struct{}

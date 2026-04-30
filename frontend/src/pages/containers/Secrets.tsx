@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Table, Space, Button, App, Tag } from 'antd';
 import { CodeOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { YamlViewer } from '@/components/YamlViewer';
 import {
-  useSecrets,
-  secretsStore,
   buildSecretYaml,
+  deleteClusterResource,
+  ensureSecretsLoaded,
+  fetchClusterResourceYaml,
+  useSecrets,
   type Secret,
 } from '@/data/clusterResources';
 import { useApp } from '@/context/AppContext';
@@ -23,7 +25,22 @@ export function Secrets() {
   const { message, modal } = App.useApp();
   const all = useSecrets();
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
-  const [yaml, setYaml] = useState<Secret | null>(null);
+  const [yaml, setYaml] = useState<{ title: string; body: string } | null>(null);
+
+  useEffect(() => {
+    ensureSecretsLoaded(namespace);
+  }, [namespace]);
+
+  async function showYaml(r: (typeof data)[number]) {
+    const fallback = buildSecretYaml(r);
+    try {
+      const body = await fetchClusterResourceYaml('secrets', r.namespace, r.name, fallback);
+      setYaml({ title: `Secret · ${r.name}`, body });
+    } catch (err) {
+      setYaml({ title: `Secret · ${r.name}`, body: fallback });
+      message.error(err instanceof Error ? err.message : 'Failed to fetch YAML');
+    }
+  }
 
   return (
     <div className="knaic-page">
@@ -45,7 +62,7 @@ export function Secrets() {
             width: 140,
             render: (_, r) => (
               <Space>
-                <Button size="small" icon={<CodeOutlined />} onClick={() => setYaml(r)}>YAML</Button>
+                <Button size="small" icon={<CodeOutlined />} onClick={() => void showYaml(r)}>YAML</Button>
                 <Button
                   size="small"
                   danger
@@ -54,9 +71,14 @@ export function Secrets() {
                     modal.confirm({
                       title: `Delete Secret ${r.name}?`,
                       content: 'Workloads referencing this secret will start failing.',
-                      onOk: () => {
-                        secretsStore.set(prev => prev.filter(x => x.id !== r.id));
-                        message.success('Deleted');
+                      onOk: async () => {
+                        try {
+                          await deleteClusterResource('secrets', r.namespace, r.name);
+                          message.success('Deleted');
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : 'Failed to delete Secret');
+                          throw err;
+                        }
                       },
                     })
                   }
@@ -69,8 +91,8 @@ export function Secrets() {
       <YamlViewer
         open={!!yaml}
         onClose={() => setYaml(null)}
-        title={`Secret · ${yaml?.name ?? ''}`}
-        yaml={yaml ? buildSecretYaml(yaml) : ''}
+        title={yaml?.title ?? ''}
+        yaml={yaml?.body ?? ''}
       />
     </div>
   );

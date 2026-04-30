@@ -1,13 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Table, Tag, Space, Button, App } from 'antd';
 import { CodeOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { YamlViewer } from '@/components/YamlViewer';
 import {
-  useK8sServices,
-  k8sServicesStore,
   buildServiceYaml,
-  type K8sService,
+  deleteClusterResource,
+  ensureServicesLoaded,
+  fetchClusterResourceYaml,
+  useK8sServices,
 } from '@/data/clusterResources';
 import { useApp } from '@/context/AppContext';
 
@@ -16,7 +17,22 @@ export function Services() {
   const { message, modal } = App.useApp();
   const all = useK8sServices();
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
-  const [yaml, setYaml] = useState<K8sService | null>(null);
+  const [yaml, setYaml] = useState<{ title: string; body: string } | null>(null);
+
+  useEffect(() => {
+    ensureServicesLoaded(namespace);
+  }, [namespace]);
+
+  async function showYaml(r: (typeof data)[number]) {
+    const fallback = buildServiceYaml(r);
+    try {
+      const body = await fetchClusterResourceYaml('services', r.namespace, r.name, fallback);
+      setYaml({ title: `Service · ${r.name}`, body });
+    } catch (err) {
+      setYaml({ title: `Service · ${r.name}`, body: fallback });
+      message.error(err instanceof Error ? err.message : 'Failed to fetch YAML');
+    }
+  }
 
   return (
     <div className="knaic-page">
@@ -49,7 +65,7 @@ export function Services() {
             width: 140,
             render: (_, r) => (
               <Space>
-                <Button size="small" icon={<CodeOutlined />} onClick={() => setYaml(r)}>YAML</Button>
+                <Button size="small" icon={<CodeOutlined />} onClick={() => void showYaml(r)}>YAML</Button>
                 <Button
                   size="small"
                   danger
@@ -57,9 +73,14 @@ export function Services() {
                   onClick={() =>
                     modal.confirm({
                       title: `Delete service ${r.name}?`,
-                      onOk: () => {
-                        k8sServicesStore.set(prev => prev.filter(s => s.id !== r.id));
-                        message.success('Deleted');
+                      onOk: async () => {
+                        try {
+                          await deleteClusterResource('services', r.namespace, r.name);
+                          message.success('Deleted');
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : 'Failed to delete service');
+                          throw err;
+                        }
                       },
                     })
                   }
@@ -72,8 +93,8 @@ export function Services() {
       <YamlViewer
         open={!!yaml}
         onClose={() => setYaml(null)}
-        title={`Service · ${yaml?.name ?? ''}`}
-        yaml={yaml ? buildServiceYaml(yaml) : ''}
+        title={yaml?.title ?? ''}
+        yaml={yaml?.body ?? ''}
       />
     </div>
   );

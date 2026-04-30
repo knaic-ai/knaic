@@ -1,9 +1,9 @@
-# knaic — Kubernetes Native AI Console (prototype)
+# knaic — Kubernetes Native AI Console
 
-A fully-interactive Web UI prototype of the **knaic** console described in
-`../knaic-desc.md`. All data is in-memory / synthetic; there is no backend.
-Every page exercises the CRUD modals, fake streaming, charts, and admin flows
-that the real product would expose.
+A fully-interactive Web UI for the **knaic** console described in
+`../knaic-desc.md`. By default the frontend calls the backend API and requires
+backend authentication before loading cluster data. A prototype-only mode is
+still available for design review.
 
 Visual tokens (blue primary `#2468f2`, 2px radius, compact density) are tuned
 to match the `aml-fe` / `@alauda/ui` look-and-feel.
@@ -27,6 +27,31 @@ npm install          # or: pnpm install / yarn install
 npm run dev          # http://localhost:4300
 npm run build        # tsc -b && vite build
 npm run typecheck
+```
+
+## Backend API and OIDC
+
+Local development defaults to same-origin API calls under `/api/v1`; the Vite
+proxy forwards those requests to `http://localhost:8080`.
+
+Run the backend with the same OIDC variables used in deployment:
+
+```bash
+KNAIC_OIDC_ISSUER=https://dex.example.com \
+KNAIC_OIDC_CLIENT_ID=knaic \
+KNAIC_OIDC_ADMIN_GROUP=knaic:platform-admins \
+KNAIC_OIDC_SCOPES="openid profile email groups" \
+go run ./cmd/knaic-api
+```
+
+When auth is enabled, the frontend first probes `/api/v1/whoami`. A `401`
+causes it to fetch `/api/v1/auth/config`, discover the OIDC provider, and start
+Authorization Code + PKCE login at `/auth/callback`.
+
+For prototype-only mode without backend calls:
+
+```bash
+VITE_KNAIC_API=disabled npm run dev
 ```
 
 ## Feature coverage (from `knaic-desc.md`)
@@ -78,9 +103,9 @@ knaic/
 └─ tsconfig*.json
 ```
 
-## Non-goals (since this is a UI prototype)
+## Prototype-only non-goals
 
-- No real Kubernetes / OIDC / Prometheus / PostgreSQL backends.
-- No persistence — refreshing the page resets edits.
+- `VITE_KNAIC_API=disabled` uses in-memory seed data and fake streaming.
+- No persistence in prototype-only mode — refreshing the page resets edits.
 - HuggingFace / ModelScope URL import only parses the URL; no actual syncing
   is performed.

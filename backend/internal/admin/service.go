@@ -83,6 +83,26 @@ func (s *Service) PatchNode(ctx context.Context, name string, patch NodePatch) (
 	return projectNode(updated), nil
 }
 
+// ListNamespaceRefs returns the lightweight name+status pairs used by the
+// namespace selector. Public to any authenticated caller — see ListNamespaces
+// for the admin-only shape.
+func (s *Service) ListNamespaceRefs(ctx context.Context) ([]NamespaceRef, error) {
+	if err := s.requireClient(); err != nil {
+		return nil, err
+	}
+	list, err := s.typed.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NamespaceRef, 0, len(list.Items))
+	for i := range list.Items {
+		ns := &list.Items[i]
+		out = append(out, NamespaceRef{Name: ns.Name, Status: string(ns.Status.Phase)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 func (s *Service) ListNamespaces(ctx context.Context) ([]Namespace, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err

@@ -1,8 +1,8 @@
 import { Table, Tag, Space, Button, App, Modal, Form, Select, Switch } from 'antd';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { EditOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
-import { useUsers, usersStore, type UserRecord } from '@/data/users';
+import { ensureUsersLoaded, updateUser, useUsers, type UserRecord } from '@/data/users';
 import { useApp, type NamespaceRole } from '@/context/AppContext';
 
 const roleColor: Record<NamespaceRole, string> = {
@@ -17,6 +17,10 @@ export function UsersPage() {
   const users = useUsers();
   const [edit, setEdit] = useState<UserRecord | null>(null);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    ensureUsersLoaded();
+  }, []);
 
   return (
     <div className="knaic-page">
@@ -84,11 +88,13 @@ export function UsersPage() {
           for (const e of (v.memberships ?? []) as { ns: string; role: NamespaceRole }[]) {
             if (e.ns) memberships[e.ns] = e.role;
           }
-          usersStore.set(prev =>
-            prev.map(u => (u.id === edit!.id ? { ...u, isPlatformAdmin: v.isPlatformAdmin, memberships } : u)),
-          );
-          setEdit(null);
-          message.success('User updated');
+          try {
+            await updateUser(edit!.id, { isPlatformAdmin: v.isPlatformAdmin, memberships });
+            setEdit(null);
+            message.success('User updated');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to update user');
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>

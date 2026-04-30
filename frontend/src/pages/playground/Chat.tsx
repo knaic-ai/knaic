@@ -2,10 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { Card, Space, Select, Input, Button, Slider, App } from 'antd';
 import { SendOutlined, ClearOutlined, PauseOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
-import { useProviders } from '@/data/playground';
+import { ensureProvidersLoaded, useProviders } from '@/data/playground';
 import { streamResponse, type ChatMessage } from './fakeStream';
+import { apiEnabled } from '@/api/client';
+import { streamChat, type PlaygroundMessage } from '@/api/playground';
+import { useApp } from '@/context/AppContext';
 
 export function Chat() {
+  const { namespace } = useApp();
   const providers = useProviders();
   const { message } = App.useApp();
   const [providerId, setProviderId] = useState<string>(providers[0]?.id ?? '');
@@ -16,6 +20,18 @@ export function Chat() {
   const [streaming, setStreaming] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const cancelRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    ensureProvidersLoaded(namespace);
+  }, [namespace]);
+
+  useEffect(() => {
+    if (providers.length === 0) {
+      if (providerId) setProviderId('');
+      return;
+    }
+    if (!providers.some(p => p.id === providerId)) setProviderId(providers[0].id);
+  }, [providerId, providers]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -37,6 +53,35 @@ export function Chat() {
     setMessages(history);
     setInput('');
     setStreaming(true);
+    if (apiEnabled) {
+      const ac = new AbortController();
+      cancelRef.current = () => ac.abort();
+      const requestMessages: PlaygroundMessage[] = [
+        ...(system.trim() ? [{ role: 'system' as const, content: system.trim() }] : []),
+        ...history.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+      ];
+      void streamChat(
+        { providerId: provider.id, messages: requestMessages, temperature },
+        {
+          signal: ac.signal,
+          onChunk: chunk => {
+            setMessages(prev => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              copy[copy.length - 1] = { ...last, content: last.content + chunk };
+              return copy;
+            });
+          },
+          onDone: () => setStreaming(false),
+        },
+      ).catch(err => {
+        if ((err as Error).name !== 'AbortError') {
+          message.error(err instanceof Error ? err.message : 'Failed to stream response');
+        }
+        setStreaming(false);
+      });
+      return;
+    }
     cancelRef.current = streamResponse(
       { model: provider.model, temperature, system, history: history.slice(0, -1) },
       chunk => {

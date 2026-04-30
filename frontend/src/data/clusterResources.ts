@@ -1,4 +1,11 @@
 import { createStore, useStore, uid } from './store';
+import { apiEnabled } from '@/api/client';
+import {
+  deleteNamespaced,
+  fetchYaml as apiFetchYaml,
+  listNamespaced,
+  type Slug,
+} from '@/api/k8sres';
 
 export interface K8sService {
   id: string;
@@ -169,6 +176,93 @@ export const useConfigMaps = () => useStore(configMapsStore);
 export const useSecrets = () => useStore(secretsStore);
 export const useGateways = () => useStore(gatewaysStore);
 export const useHTTPRoutes = () => useStore(httpRoutesStore);
+
+const loaded = new Set<string>();
+
+async function loadInto<T extends { namespace: string; name: string; id?: string }>(
+  store: ReturnType<typeof createStore<T[]>>,
+  slug: Slug,
+  ns: string,
+  ensure: (item: T) => T,
+): Promise<void> {
+  const remote = (await listNamespaced<T>(slug, ns)).map(ensure);
+  store.set(prev => [...prev.filter(x => x.namespace !== ns), ...remote]);
+}
+
+function once(key: string, fn: () => Promise<void>) {
+  if (!apiEnabled || loaded.has(key)) return;
+  loaded.add(key);
+  fn().catch(() => loaded.delete(key));
+}
+
+export function ensureServicesLoaded(ns: string) {
+  once(`svc:${ns}`, () => loadInto(k8sServicesStore, 'services', ns, s => ({ ...s, id: s.id || `svc-${s.namespace}-${s.name}` })));
+}
+
+export function ensureConfigMapsLoaded(ns: string) {
+  once(`cm:${ns}`, () => loadInto(configMapsStore, 'configmaps', ns, c => ({ ...c, id: c.id || `cm-${c.namespace}-${c.name}` })));
+}
+
+export function ensureSecretsLoaded(ns: string) {
+  once(`secret:${ns}`, () => loadInto(secretsStore, 'secrets', ns, s => ({ ...s, id: s.id || `sec-${s.namespace}-${s.name}` })));
+}
+
+export function ensureGatewaysLoaded(ns: string) {
+  once(`gateways:${ns}`, async () => {
+    await Promise.all([
+      loadInto(gatewaysStore, 'gateways', ns, g => ({ ...g, id: g.id || `gw-${g.namespace}-${g.name}` })),
+      loadInto(httpRoutesStore, 'httproutes', ns, r => ({ ...r, id: r.id || `hr-${r.namespace}-${r.name}` })),
+    ]);
+  });
+}
+
+export function reloadServices(ns: string) {
+  loaded.delete(`svc:${ns}`);
+  ensureServicesLoaded(ns);
+}
+
+export function reloadConfigMaps(ns: string) {
+  loaded.delete(`cm:${ns}`);
+  ensureConfigMapsLoaded(ns);
+}
+
+export function reloadSecrets(ns: string) {
+  loaded.delete(`secret:${ns}`);
+  ensureSecretsLoaded(ns);
+}
+
+export function reloadGateways(ns: string) {
+  loaded.delete(`gateways:${ns}`);
+  ensureGatewaysLoaded(ns);
+}
+
+export async function deleteClusterResource(slug: Slug, ns: string, name: string): Promise<void> {
+  if (apiEnabled) await deleteNamespaced(slug, ns, name);
+  switch (slug) {
+    case 'services':
+      k8sServicesStore.set(prev => prev.filter(x => !(x.namespace === ns && x.name === name)));
+      break;
+    case 'configmaps':
+      configMapsStore.set(prev => prev.filter(x => !(x.namespace === ns && x.name === name)));
+      break;
+    case 'secrets':
+      secretsStore.set(prev => prev.filter(x => !(x.namespace === ns && x.name === name)));
+      break;
+    case 'gateways':
+      gatewaysStore.set(prev => prev.filter(x => !(x.namespace === ns && x.name === name)));
+      break;
+    case 'httproutes':
+      httpRoutesStore.set(prev => prev.filter(x => !(x.namespace === ns && x.name === name)));
+      break;
+    default:
+      break;
+  }
+}
+
+export async function fetchClusterResourceYaml(slug: Slug, ns: string, name: string, fallback: string): Promise<string> {
+  if (!apiEnabled) return fallback;
+  return apiFetchYaml(slug, ns, name);
+}
 
 export function buildServiceYaml(s: K8sService): string {
   return `apiVersion: v1

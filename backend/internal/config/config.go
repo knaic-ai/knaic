@@ -14,7 +14,12 @@ type Config struct {
 
 	OIDCIssuer             string
 	OIDCClientID           string
+	OIDCClientSecret       string
+	OIDCRedirectURI        string
 	OIDCAdminGroup         string
+	OIDCScopes             string
+	OIDCUsernameClaim      string
+	OIDCUsernamePrefix     string
 	OIDCInsecureSkipVerify bool
 	AuthDisabled           bool
 
@@ -36,7 +41,12 @@ func Load() (*Config, error) {
 		KubeconfigPath:         env("KUBECONFIG", ""),
 		OIDCIssuer:             env("KNAIC_OIDC_ISSUER", ""),
 		OIDCClientID:           env("KNAIC_OIDC_CLIENT_ID", "knaic"),
+		OIDCClientSecret:       env("KNAIC_OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURI:        env("KNAIC_OIDC_REDIRECT_URI", ""),
+		OIDCUsernameClaim:      env("KNAIC_OIDC_USERNAME_CLAIM", "email"),
+		OIDCUsernamePrefix:     env("KNAIC_OIDC_USERNAME_PREFIX", ""),
 		OIDCAdminGroup:         env("KNAIC_OIDC_ADMIN_GROUP", "knaic:platform-admins"),
+		OIDCScopes:             env("KNAIC_OIDC_SCOPES", "openid profile email groups"),
 		OIDCInsecureSkipVerify: boolEnv("KNAIC_OIDC_INSECURE_SKIP_VERIFY", true),
 		AuthDisabled:           boolEnv("KNAIC_AUTH_DISABLED", false),
 		RegistryEndpoint:       env("KNAIC_REGISTRY_ENDPOINT", "registry.knaic.local"),

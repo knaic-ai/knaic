@@ -4,15 +4,18 @@ import { PlusOutlined, DeleteOutlined, FileTextOutlined, EditOutlined, CodeOutli
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
 import {
-  deploymentsStore,
-  useDeployments,
-  ensureDeploymentsLoaded,
-  reloadDeployments,
+  createDeployment,
   deleteWorkload,
+  ensureDeploymentsLoaded,
+  ensurePodsLoaded,
   fetchResourceYaml,
+  reloadDeployments,
+  updateDeployment,
+  useDeployments,
+  usePods,
   type Deployment,
+  type Pod,
 } from '@/data/workloads';
-import { uid } from '@/data/store';
 import { useApp } from '@/context/AppContext';
 import { LogViewer } from '@/components/LogViewer';
 import { YamlViewer } from '@/components/YamlViewer';
@@ -23,17 +26,22 @@ export function Deployments() {
   const { namespace } = useApp();
   const { message, modal } = App.useApp();
   const all = useDeployments();
+  const pods = usePods();
   const data = useMemo(() => all.filter(d => d.namespace === namespace), [all, namespace]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Deployment | null>(null);
   const [form] = Form.useForm();
-  const [logTarget, setLogTarget] = useState<Deployment | null>(null);
+  const [logTarget, setLogTarget] = useState<{ deployment: Deployment; pod?: Pod } | null>(null);
   const [yaml, setYaml] = useState<{ dep: Deployment; text: string } | null>(null);
   const [yamlLoading, setYamlLoading] = useState<string | null>(null);
 
   useEffect(() => {
     ensureDeploymentsLoaded(namespace);
+    ensurePodsLoaded(namespace);
   }, [namespace]);
+
+  const podFor = (deployment: Deployment) =>
+    pods.find(p => p.namespace === deployment.namespace && p.ownerRef === `Deployment/${deployment.name}`);
 
   const openYaml = async (dep: Deployment) => {
     setYamlLoading(dep.name);
@@ -56,13 +64,10 @@ export function Deployments() {
         extra={
           <Space>
             <Button onClick={() => reloadDeployments(namespace)}>Refresh</Button>
-            <Tooltip
-              title={apiEnabled ? 'Create raw Deployments via kubectl; this page is read-only when connected to a cluster.' : ''}
-            >
+            <Tooltip title="Create a Kubernetes Deployment in the selected namespace">
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
-                disabled={apiEnabled}
                 onClick={() => { setEditing(null); form.resetFields(); setOpen(true); }}
               >
                 New deployment
@@ -93,7 +98,18 @@ export function Deployments() {
             width: 240,
             render: (_, r) => (
               <Space>
-                <Button size="small" icon={<FileTextOutlined />} onClick={() => setLogTarget(r)}>
+                <Button
+                  size="small"
+                  icon={<FileTextOutlined />}
+                  onClick={() => {
+                    const pod = podFor(r);
+                    if (apiEnabled && !pod) {
+                      message.warning('No pod found for this deployment');
+                      return;
+                    }
+                    setLogTarget({ deployment: r, pod });
+                  }}
+                >
                   Logs
                 </Button>
                 <Button
@@ -104,11 +120,10 @@ export function Deployments() {
                 >
                   YAML
                 </Button>
-                <Tooltip title={apiEnabled ? 'Edit via kubectl/GitOps; UI editing is prototype-only' : ''}>
+                <Tooltip title="Update image and replica count">
                   <Button
                     size="small"
                     icon={<EditOutlined />}
-                    disabled={apiEnabled}
                     onClick={() => {
                       setEditing(r);
                       form.setFieldsValue(r);
@@ -148,35 +163,19 @@ export function Deployments() {
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields();
-          if (editing) {
-            deploymentsStore.set(prev =>
-              prev.map(d => (d.id === editing.id ? { ...d, ...v, readyReplicas: Math.min(d.readyReplicas, v.replicas) } : d)),
-            );
-            message.success('Deployment updated');
-          } else {
-            deploymentsStore.set(prev => [
-              {
-                id: uid('dep'),
-                name: v.name,
-                namespace,
-                image: v.image,
-                replicas: v.replicas,
-                readyReplicas: 0,
-                status: 'Progressing',
-                createdAt: new Date().toISOString().slice(0, 10),
-                labels: { app: v.name },
-              },
-              ...prev,
-            ]);
-            window.setTimeout(() => {
-              deploymentsStore.set(prev =>
-                prev.map(d => (d.name === v.name ? { ...d, readyReplicas: v.replicas, status: 'Running' } : d)),
-              );
-            }, 1200);
-            message.success('Deployment created');
+          try {
+            if (editing) {
+              await updateDeployment(namespace, editing, { image: v.image, replicas: v.replicas });
+              message.success('Deployment updated');
+            } else {
+              await createDeployment(namespace, { name: v.name, image: v.image, replicas: v.replicas });
+              message.success('Deployment created');
+            }
+            setOpen(false);
+            form.resetFields();
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to save deployment');
           }
-          setOpen(false);
-          form.resetFields();
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>
@@ -195,8 +194,9 @@ export function Deployments() {
       <LogViewer
         open={!!logTarget}
         onClose={() => setLogTarget(null)}
-        title={`Logs · ${logTarget?.name ?? ''}`}
-        containers={['main', 'sidecar']}
+        title={`Logs · ${logTarget?.deployment.name ?? ''}`}
+        containers={logTarget?.pod?.containers ?? ['main', 'sidecar']}
+        podRef={logTarget?.pod ? { namespace: logTarget.pod.namespace, name: logTarget.pod.name } : undefined}
       />
       <YamlViewer
         open={!!yaml}

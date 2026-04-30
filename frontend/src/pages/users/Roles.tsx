@@ -1,21 +1,30 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Table, Button, Space, App, Modal, Form, Input, Select, Tag } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import {
-  useRoles,
+  ensureBindingsLoaded,
+  ensureRolesLoaded,
+  ensureUsersLoaded,
+  removeBinding,
+  removeRole,
+  saveBinding,
+  saveRole,
   useBindings,
-  rolesStore,
-  bindingsStore,
+  useRoles,
   useUsers,
   type Role,
   type RoleBinding,
 } from '@/data/users';
-import { uid } from '@/data/store';
 import { useApp } from '@/context/AppContext';
 
 const VERBS = ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'];
 const GROUPS = ['', 'apps', 'batch', 'serving.kserve.io', 'trainer.kubeflow.org', 'kubeflow.org', '*'];
+
+function parseRuleList(value: string | string[] | undefined): string[] {
+  if (Array.isArray(value)) return value.map(s => s.trim()).filter(Boolean);
+  return (value ?? '').split(',').map(s => s.trim()).filter(Boolean);
+}
 
 export function RolesPage() {
   const { namespace, user } = useApp();
@@ -33,6 +42,12 @@ export function RolesPage() {
   const [editingBinding, setEditingBinding] = useState<RoleBinding | null>(null);
   const [roleForm] = Form.useForm();
   const [bindingForm] = Form.useForm();
+
+  useEffect(() => {
+    ensureUsersLoaded();
+    ensureRolesLoaded(namespace);
+    ensureBindingsLoaded(namespace);
+  }, [namespace]);
 
   return (
     <div className="knaic-page">
@@ -82,7 +97,7 @@ export function RolesPage() {
                             name: r.name,
                             kind: r.kind,
                             rules: r.rules.map(x => ({
-                              apiGroups: x.apiGroups.join(','),
+                              apiGroups: x.apiGroups,
                               resources: x.resources.join(','),
                               verbs: x.verbs,
                             })),
@@ -97,9 +112,14 @@ export function RolesPage() {
                         onClick={() =>
                           modal.confirm({
                             title: `Delete role ${r.name}?`,
-                            onOk: () => {
-                              rolesStore.set(prev => prev.filter(x => x.id !== r.id));
-                              message.success('Role deleted');
+                            onOk: async () => {
+                              try {
+                                await removeRole(namespace, r.kind, r.name, r.id);
+                                message.success('Role deleted');
+                              } catch (err) {
+                                message.error(err instanceof Error ? err.message : 'Failed to delete role');
+                                throw err;
+                              }
                             },
                           })
                         }
@@ -187,9 +207,14 @@ export function RolesPage() {
                         onClick={() =>
                           modal.confirm({
                             title: `Delete binding ${r.name}?`,
-                            onOk: () => {
-                              bindingsStore.set(prev => prev.filter(x => x.id !== r.id));
-                              message.success('Binding deleted');
+                            onOk: async () => {
+                              try {
+                                await removeBinding(namespace, r.name, r.id);
+                                message.success('Binding deleted');
+                              } catch (err) {
+                                message.error(err instanceof Error ? err.message : 'Failed to delete binding');
+                                throw err;
+                              }
                             },
                           })
                         }
@@ -211,25 +236,23 @@ export function RolesPage() {
         destroyOnClose
         onOk={async () => {
           const v = await roleForm.validateFields();
-          const rules = (v.rules ?? []).map((r: { apiGroups: string; resources: string; verbs: string[] }) => ({
-            apiGroups: r.apiGroups.split(',').map((s: string) => s.trim()).filter(Boolean),
-            resources: r.resources.split(',').map((s: string) => s.trim()).filter(Boolean),
+          const rules = (v.rules ?? []).map((r: { apiGroups: string | string[]; resources: string; verbs: string[] }) => ({
+            apiGroups: parseRuleList(r.apiGroups),
+            resources: parseRuleList(r.resources),
             verbs: r.verbs,
           }));
-          if (editingRole) {
-            rolesStore.set(prev =>
-              prev.map(x => (x.id === editingRole.id ? { ...x, ...v, rules } : x)),
-            );
-            message.success('Role updated');
-          } else {
-            rolesStore.set(prev => [
-              { id: uid('r'), namespace, name: v.name, kind: v.kind ?? 'Role', rules },
-              ...prev,
-            ]);
-            message.success('Role created');
+          try {
+            await saveRole(namespace, {
+              name: v.name,
+              kind: v.kind ?? 'Role',
+              rules,
+            });
+            message.success(editingRole ? 'Role updated' : 'Role created');
+            setRoleOpen(false);
+            roleForm.resetFields();
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to save role');
           }
-          setRoleOpen(false);
-          roleForm.resetFields();
         }}
       >
         <Form form={roleForm} layout="vertical" preserve={false}>
@@ -245,7 +268,7 @@ export function RolesPage() {
               ]}
             />
           </Form.Item>
-          <Form.List name="rules" initialValue={[{ apiGroups: '', resources: '', verbs: ['get', 'list'] }]}>
+          <Form.List name="rules" initialValue={[{ apiGroups: [], resources: '', verbs: ['get', 'list'] }]}>
             {(fields, { add, remove }) => (
               <>
                 {fields.map(({ key, name }) => (
@@ -268,7 +291,7 @@ export function RolesPage() {
                     </Space>
                   </Card>
                 ))}
-                <Button block icon={<PlusOutlined />} onClick={() => add({ apiGroups: '', resources: '', verbs: ['get'] })}>
+                <Button block icon={<PlusOutlined />} onClick={() => add({ apiGroups: [], resources: '', verbs: ['get'] })}>
                   Add rule
                 </Button>
               </>
@@ -286,24 +309,18 @@ export function RolesPage() {
           const v = await bindingForm.validateFields();
           const [kind, roleName] = (v.roleRef as string).split(':') as ['Role' | 'ClusterRole', string];
           const subjects = (v.users as string[]).map(n => ({ kind: 'User' as const, name: n }));
-          if (editingBinding) {
-            bindingsStore.set(prev =>
-              prev.map(b =>
-                b.id === editingBinding.id
-                  ? { ...b, name: v.name, roleRef: { kind, name: roleName }, subjects }
-                  : b,
-              ),
-            );
-            message.success('Binding updated');
-          } else {
-            bindingsStore.set(prev => [
-              { id: uid('rb'), namespace, name: v.name, roleRef: { kind, name: roleName }, subjects },
-              ...prev,
-            ]);
-            message.success('Binding created');
+          try {
+            await saveBinding(namespace, {
+              name: v.name,
+              roleRef: { kind, name: roleName },
+              subjects,
+            });
+            message.success(editingBinding ? 'Binding updated' : 'Binding created');
+            setBindingOpen(false);
+            bindingForm.resetFields();
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to save binding');
           }
-          setBindingOpen(false);
-          bindingForm.resetFields();
         }}
       >
         <Form form={bindingForm} layout="vertical" preserve={false}>

@@ -1,12 +1,20 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Table, Tag, Space, Button, App, Modal, Form, Input } from 'antd';
 import { PlusOutlined, DeleteOutlined, SyncOutlined, LinkOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
-import { providersStore, useProviders, type LLMProvider } from '@/data/playground';
-import { useInferenceServices } from '@/data/inference';
-import { uid } from '@/data/store';
+import {
+  addProvider,
+  ensureProvidersLoaded,
+  removeProvider,
+  replaceClusterProviders,
+  useProviders,
+  type LLMProvider,
+} from '@/data/playground';
+import { ensureInferenceServicesLoaded, useInferenceServices } from '@/data/inference';
 import { useApp } from '@/context/AppContext';
+import { apiEnabled } from '@/api/client';
+import { streamChat } from '@/api/playground';
 
 export function LLMRegistry() {
   const { namespace } = useApp();
@@ -14,6 +22,7 @@ export function LLMRegistry() {
   const providers = useProviders();
   const services = useInferenceServices();
   const [open, setOpen] = useState(false);
+  const [testing, setTesting] = useState<string | null>(null);
   const [form] = Form.useForm();
 
   const inScope = useMemo(
@@ -22,7 +31,12 @@ export function LLMRegistry() {
     [providers, namespace],
   );
 
-  function discover() {
+  useEffect(() => {
+    ensureProvidersLoaded(namespace);
+    ensureInferenceServicesLoaded(namespace);
+  }, [namespace]);
+
+  async function discover() {
     const fresh = services
       .filter(s => s.kind === 'LLMInferenceService')
       .map<LLMProvider>(s => ({
@@ -35,11 +49,46 @@ export function LLMRegistry() {
         description: `Auto-discovered from LLMInferenceService ${s.name}`,
         status: s.status,
       }));
-    providersStore.set(prev => {
-      const external = prev.filter(p => p.source === 'external');
-      return [...fresh, ...external];
-    });
-    message.success(`Re-synced ${fresh.length} in-cluster LLM services`);
+    try {
+      await replaceClusterProviders(fresh.map(({ id: _id, ...p }) => p), namespace);
+      message.success(`Re-synced ${fresh.length} in-cluster LLM services`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : 'Failed to sync providers');
+    }
+  }
+
+  async function testProvider(provider: LLMProvider) {
+    if (provider.status !== 'Ready') {
+      message.warning(`Provider ${provider.name} is ${provider.status}`);
+      return;
+    }
+    if (!apiEnabled) {
+      message.success('Provider is available in prototype mode');
+      return;
+    }
+    setTesting(provider.id);
+    try {
+      let gotChunk = false;
+      await streamChat(
+        {
+          providerId: provider.id,
+          messages: [{ role: 'user', content: 'ping' }],
+          temperature: 0,
+          maxTokens: 8,
+        },
+        {
+          onChunk: () => {
+            gotChunk = true;
+          },
+          onDone: () => undefined,
+        },
+      );
+      message.success(gotChunk ? 'Provider responded' : 'Provider stream completed');
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : 'Provider test failed');
+    } finally {
+      setTesting(null);
+    }
   }
 
   return (
@@ -78,7 +127,14 @@ export function LLMRegistry() {
             width: 160,
             render: (_, r) => (
               <Space>
-                <Button size="small" icon={<LinkOutlined />}>Test</Button>
+                <Button
+                  size="small"
+                  icon={<LinkOutlined />}
+                  loading={testing === r.id}
+                  onClick={() => void testProvider(r)}
+                >
+                  Test
+                </Button>
                 {r.source === 'external' && (
                   <Button
                     size="small"
@@ -87,9 +143,14 @@ export function LLMRegistry() {
                     onClick={() =>
                       modal.confirm({
                         title: `Delete provider ${r.name}?`,
-                        onOk: () => {
-                          providersStore.set(prev => prev.filter(p => p.id !== r.id));
-                          message.success('Provider removed');
+                        onOk: async () => {
+                          try {
+                            await removeProvider(r.id);
+                            message.success('Provider removed');
+                          } catch (err) {
+                            message.error(err instanceof Error ? err.message : 'Failed to remove provider');
+                            throw err;
+                          }
                         },
                       })
                     }
@@ -107,9 +168,8 @@ export function LLMRegistry() {
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields();
-          providersStore.set(prev => [
-            {
-              id: uid('llm'),
+          try {
+            await addProvider({
               name: v.name,
               source: 'external',
               endpoint: v.endpoint,
@@ -117,12 +177,13 @@ export function LLMRegistry() {
               model: v.model,
               description: v.description,
               status: 'Ready',
-            },
-            ...prev,
-          ]);
-          setOpen(false);
-          form.resetFields();
-          message.success('Provider added');
+            });
+            setOpen(false);
+            form.resetFields();
+            message.success('Provider added');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to add provider');
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>

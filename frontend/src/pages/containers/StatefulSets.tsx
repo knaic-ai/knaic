@@ -4,15 +4,17 @@ import { PlusOutlined, DeleteOutlined, FileTextOutlined, CodeOutlined } from '@a
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
 import {
-  statefulSetsStore,
-  useStatefulSets,
-  ensureStatefulSetsLoaded,
-  reloadStatefulSets,
+  createStatefulSet,
   deleteWorkload,
+  ensurePodsLoaded,
+  ensureStatefulSetsLoaded,
   fetchResourceYaml,
+  reloadStatefulSets,
+  usePods,
+  useStatefulSets,
+  type Pod,
   type StatefulSet,
 } from '@/data/workloads';
-import { uid } from '@/data/store';
 import { useApp } from '@/context/AppContext';
 import { LogViewer } from '@/components/LogViewer';
 import { YamlViewer } from '@/components/YamlViewer';
@@ -23,16 +25,21 @@ export function StatefulSets() {
   const { namespace } = useApp();
   const { message, modal } = App.useApp();
   const all = useStatefulSets();
+  const pods = usePods();
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
-  const [log, setLog] = useState<StatefulSet | null>(null);
+  const [log, setLog] = useState<{ statefulSet: StatefulSet; pod?: Pod } | null>(null);
   const [yaml, setYaml] = useState<{ ss: StatefulSet; text: string } | null>(null);
   const [yamlLoading, setYamlLoading] = useState<string | null>(null);
 
   useEffect(() => {
     ensureStatefulSetsLoaded(namespace);
+    ensurePodsLoaded(namespace);
   }, [namespace]);
+
+  const podFor = (statefulSet: StatefulSet) =>
+    pods.find(p => p.namespace === statefulSet.namespace && p.ownerRef === `StatefulSet/${statefulSet.name}`);
 
   const openYaml = async (ss: StatefulSet) => {
     setYamlLoading(ss.name);
@@ -55,11 +62,10 @@ export function StatefulSets() {
         extra={
           <Space>
             <Button onClick={() => reloadStatefulSets(namespace)}>Refresh</Button>
-            <Tooltip title={apiEnabled ? 'Create raw StatefulSets via kubectl' : ''}>
+            <Tooltip title="Create a Kubernetes StatefulSet in the selected namespace">
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
-                disabled={apiEnabled}
                 onClick={() => setOpen(true)}
               >
                 New StatefulSet
@@ -87,7 +93,18 @@ export function StatefulSets() {
             width: 200,
             render: (_, r) => (
               <Space>
-                <Button size="small" icon={<FileTextOutlined />} onClick={() => setLog(r)}>
+                <Button
+                  size="small"
+                  icon={<FileTextOutlined />}
+                  onClick={() => {
+                    const pod = podFor(r);
+                    if (apiEnabled && !pod) {
+                      message.warning('No pod found for this StatefulSet');
+                      return;
+                    }
+                    setLog({ statefulSet: r, pod });
+                  }}
+                >
                   Logs
                 </Button>
                 <Button
@@ -129,28 +146,14 @@ export function StatefulSets() {
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields();
-          statefulSetsStore.set(prev => [
-            {
-              id: uid('ss'),
-              name: v.name,
-              namespace,
-              image: v.image,
-              replicas: v.replicas,
-              readyReplicas: 0,
-              status: 'Progressing',
-              createdAt: new Date().toISOString().slice(0, 10),
-              serviceName: v.name,
-            },
-            ...prev,
-          ]);
-          window.setTimeout(() => {
-            statefulSetsStore.set(prev =>
-              prev.map(s => (s.name === v.name ? { ...s, readyReplicas: v.replicas, status: 'Running' } : s)),
-            );
-          }, 1500);
-          setOpen(false);
-          form.resetFields();
-          message.success('StatefulSet created');
+          try {
+            await createStatefulSet(namespace, { name: v.name, image: v.image, replicas: v.replicas });
+            setOpen(false);
+            form.resetFields();
+            message.success('StatefulSet created');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to create StatefulSet');
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>
@@ -164,8 +167,9 @@ export function StatefulSets() {
       <LogViewer
         open={!!log}
         onClose={() => setLog(null)}
-        title={`Logs · ${log?.name ?? ''}`}
-        containers={['main']}
+        title={`Logs · ${log?.statefulSet.name ?? ''}`}
+        containers={log?.pod?.containers ?? ['main']}
+        podRef={log?.pod ? { namespace: log.pod.namespace, name: log.pod.name } : undefined}
       />
       <YamlViewer
         open={!!yaml}

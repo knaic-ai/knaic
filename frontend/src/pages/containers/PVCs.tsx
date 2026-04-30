@@ -4,19 +4,17 @@ import { PlusOutlined, DeleteOutlined, CodeOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
 import {
-  pvcsStore,
-  usePVCs,
-  ensurePvcsLoaded,
-  reloadPvcs,
+  createPVC,
   deleteWorkload,
+  ensurePvcsLoaded,
   fetchResourceYaml,
+  reloadPvcs,
+  usePVCs,
   type PVC,
 } from '@/data/workloads';
-import { uid } from '@/data/store';
 import { useApp } from '@/context/AppContext';
 import { YamlViewer } from '@/components/YamlViewer';
 import { buildPVCYaml } from '@/data/clusterResources';
-import { apiEnabled } from '@/api/client';
 
 export function PVCs() {
   const { namespace } = useApp();
@@ -53,11 +51,10 @@ export function PVCs() {
         extra={
           <Space>
             <Button onClick={() => reloadPvcs(namespace)}>Refresh</Button>
-            <Tooltip title={apiEnabled ? 'PVCs are usually created by Notebooks/Inference services' : ''}>
+            <Tooltip title="Create a PersistentVolumeClaim in the selected namespace">
               <Button
                 type="primary"
                 icon={<PlusOutlined />}
-                disabled={apiEnabled}
                 onClick={() => setOpen(true)}
               >
                 New PVC
@@ -123,32 +120,19 @@ export function PVCs() {
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields();
-          pvcsStore.set(prev => [
-            {
-              id: uid('pvc'),
+          try {
+            await createPVC(namespace, {
               name: v.name,
-              namespace,
-              status: 'Pending',
               storageClass: v.storageClass,
               capacity: v.capacity,
               accessMode: v.accessMode,
-              volumeName: '',
-              createdAt: new Date().toISOString().slice(0, 10),
-            },
-            ...prev,
-          ]);
-          window.setTimeout(() => {
-            pvcsStore.set(prev =>
-              prev.map(p =>
-                p.name === v.name && p.namespace === namespace
-                  ? { ...p, status: 'Bound', volumeName: `pvc-${Math.random().toString(36).slice(2, 8)}` }
-                  : p,
-              ),
-            );
-          }, 1200);
-          setOpen(false);
-          form.resetFields();
-          message.success('PVC created');
+            });
+            setOpen(false);
+            form.resetFields();
+            message.success('PVC created');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to create PVC');
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>

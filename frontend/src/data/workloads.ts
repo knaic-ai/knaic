@@ -4,6 +4,8 @@ import {
   listNamespaced,
   deleteNamespaced,
   fetchYaml as apiFetchYaml,
+  createNamespaced,
+  updateNamespaced,
   type Slug,
 } from '@/api/k8sres';
 
@@ -347,9 +349,8 @@ export async function reloadPvcs(ns: string) {
 export async function deleteWorkload(slug: Slug, ns: string, name: string): Promise<void> {
   if (apiEnabled) {
     await deleteNamespaced(slug, ns, name);
-    return;
   }
-  // Prototype fallback — purge from the in-memory store.
+  // Keep the local render cache in sync in both API and prototype modes.
   switch (slug) {
     case 'deployments':
       deploymentsStore.set(prev => prev.filter(d => !(d.namespace === ns && d.name === name)));
@@ -371,4 +372,146 @@ export async function deleteWorkload(slug: Slug, ns: string, name: string): Prom
 export async function fetchResourceYaml(slug: Slug, ns: string, name: string): Promise<string> {
   if (apiEnabled) return apiFetchYaml(slug, ns, name);
   return `# Prototype mode — no real YAML available.\n# kind: ${slug}\nmetadata:\n  name: ${name}\n  namespace: ${ns}\n`;
+}
+
+export function findPodForOwner(namespace: string, kind: 'Deployment' | 'StatefulSet', name: string): Pod | undefined {
+  return podsStore.get().find(p => p.namespace === namespace && p.ownerRef === `${kind}/${name}`);
+}
+
+export async function createDeployment(ns: string, req: Pick<Deployment, 'name' | 'image' | 'replicas'>): Promise<void> {
+  if (apiEnabled) {
+    await createNamespaced<Deployment>('deployments', ns, deploymentObject(ns, req));
+    reloadDeployments(ns);
+    return;
+  }
+  deploymentsStore.set(prev => [
+    {
+      id: uid('dep'),
+      name: req.name,
+      namespace: ns,
+      image: req.image,
+      replicas: req.replicas,
+      readyReplicas: 0,
+      status: 'Progressing',
+      createdAt: new Date().toISOString().slice(0, 10),
+      labels: { app: req.name },
+    },
+    ...prev,
+  ]);
+  window.setTimeout(() => {
+    deploymentsStore.set(prev =>
+      prev.map(d => (d.namespace === ns && d.name === req.name ? { ...d, readyReplicas: req.replicas, status: 'Running' } : d)),
+    );
+  }, 1200);
+}
+
+export async function updateDeployment(ns: string, current: Deployment, patch: Pick<Deployment, 'image' | 'replicas'>): Promise<void> {
+  if (apiEnabled) {
+    await updateNamespaced<Deployment>('deployments', ns, current.name, deploymentObject(ns, { ...current, ...patch }));
+    reloadDeployments(ns);
+    return;
+  }
+  deploymentsStore.set(prev =>
+    prev.map(d => (d.id === current.id ? { ...d, ...patch, readyReplicas: Math.min(d.readyReplicas, patch.replicas) } : d)),
+  );
+}
+
+export async function createStatefulSet(ns: string, req: Pick<StatefulSet, 'name' | 'image' | 'replicas'>): Promise<void> {
+  if (apiEnabled) {
+    await createNamespaced<StatefulSet>('statefulsets', ns, statefulSetObject(ns, req));
+    reloadStatefulSets(ns);
+    return;
+  }
+  statefulSetsStore.set(prev => [
+    {
+      id: uid('ss'),
+      name: req.name,
+      namespace: ns,
+      image: req.image,
+      replicas: req.replicas,
+      readyReplicas: 0,
+      status: 'Progressing',
+      createdAt: new Date().toISOString().slice(0, 10),
+      serviceName: req.name,
+    },
+    ...prev,
+  ]);
+  window.setTimeout(() => {
+    statefulSetsStore.set(prev =>
+      prev.map(s => (s.namespace === ns && s.name === req.name ? { ...s, readyReplicas: req.replicas, status: 'Running' } : s)),
+    );
+  }, 1500);
+}
+
+export async function createPVC(ns: string, req: Pick<PVC, 'name' | 'storageClass' | 'capacity' | 'accessMode'>): Promise<void> {
+  if (apiEnabled) {
+    await createNamespaced<PVC>('pvcs', ns, pvcObject(ns, req));
+    reloadPvcs(ns);
+    return;
+  }
+  pvcsStore.set(prev => [
+    {
+      id: uid('pvc'),
+      name: req.name,
+      namespace: ns,
+      status: 'Pending',
+      storageClass: req.storageClass,
+      capacity: req.capacity,
+      accessMode: req.accessMode,
+      volumeName: '',
+      createdAt: new Date().toISOString().slice(0, 10),
+    },
+    ...prev,
+  ]);
+  window.setTimeout(() => {
+    pvcsStore.set(prev =>
+      prev.map(p => (p.namespace === ns && p.name === req.name ? { ...p, status: 'Bound', volumeName: `pvc-${req.name}` } : p)),
+    );
+  }, 1200);
+}
+
+function deploymentObject(ns: string, req: Pick<Deployment, 'name' | 'image' | 'replicas'>) {
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: { name: req.name, namespace: ns, labels: { app: req.name } },
+    spec: {
+      replicas: req.replicas,
+      selector: { matchLabels: { app: req.name } },
+      template: {
+        metadata: { labels: { app: req.name } },
+        spec: { containers: [{ name: 'main', image: req.image }] },
+      },
+    },
+  };
+}
+
+function statefulSetObject(ns: string, req: Pick<StatefulSet, 'name' | 'image' | 'replicas'>) {
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'StatefulSet',
+    metadata: { name: req.name, namespace: ns, labels: { app: req.name } },
+    spec: {
+      replicas: req.replicas,
+      serviceName: req.name,
+      selector: { matchLabels: { app: req.name } },
+      template: {
+        metadata: { labels: { app: req.name } },
+        spec: { containers: [{ name: 'main', image: req.image }] },
+      },
+    },
+  };
+}
+
+function pvcObject(ns: string, req: Pick<PVC, 'name' | 'storageClass' | 'capacity' | 'accessMode'>) {
+  return {
+    apiVersion: 'v1',
+    kind: 'PersistentVolumeClaim',
+    metadata: { name: req.name, namespace: ns },
+    spec: {
+      accessModes: [req.accessMode === 'RWO' ? 'ReadWriteOnce' : req.accessMode === 'RWX' ? 'ReadWriteMany' : req.accessMode],
+      storageClassName: req.storageClass,
+      resources: { requests: { storage: req.capacity } },
+    },
+  };
 }

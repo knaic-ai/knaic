@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Table, Tag, Space, Button, Modal, Form, Input, Select, App } from 'antd';
 import { EditOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
-import { useNodes, updateNode, type NodeInfo, type Taint } from '@/data/nodes';
+import { ensureNodesLoaded, useNodes, updateNode, type NodeInfo, type Taint } from '@/data/nodes';
 
 export function NodesPage() {
   const data = useNodes();
@@ -12,6 +12,10 @@ export function NodesPage() {
   const [taintTarget, setTaintTarget] = useState<NodeInfo | null>(null);
   const [labelForm] = Form.useForm();
   const [taintForm] = Form.useForm();
+
+  useEffect(() => {
+    ensureNodesLoaded();
+  }, []);
 
   return (
     <div className="knaic-page">
@@ -102,9 +106,13 @@ export function NodesPage() {
           const v = await labelForm.validateFields();
           const labels: Record<string, string> = {};
           for (const e of v.entries as { key: string; value: string }[]) labels[e.key] = e.value ?? '';
-          updateNode(labelTarget!.name, { labels });
-          setLabelTarget(null);
-          message.success('Labels updated');
+          try {
+            await updateNode(labelTarget!.name, { labels });
+            setLabelTarget(null);
+            message.success('Labels updated');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to update labels');
+          }
         }}
       >
         <Form form={labelForm} layout="vertical" preserve={false}>
@@ -137,9 +145,13 @@ export function NodesPage() {
         destroyOnClose
         onOk={async () => {
           const v = await taintForm.validateFields();
-          updateNode(taintTarget!.name, { taints: v.taints as Taint[] });
-          setTaintTarget(null);
-          message.success('Taints updated');
+          try {
+            await updateNode(taintTarget!.name, { taints: v.taints as Taint[] });
+            setTaintTarget(null);
+            message.success('Taints updated');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to update taints');
+          }
         }}
       >
         <Form form={taintForm} layout="vertical" preserve={false}>

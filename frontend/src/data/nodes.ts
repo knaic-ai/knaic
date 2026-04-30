@@ -1,4 +1,6 @@
 import { createStore, useStore } from './store';
+import { apiEnabled } from '@/api/client';
+import * as api from '@/api/admin';
 
 export interface Taint {
   key: string;
@@ -64,6 +66,28 @@ const initial: NodeInfo[] = [
 export const nodesStore = createStore<NodeInfo[]>(initial);
 export const useNodes = () => useStore(nodesStore);
 
-export function updateNode(name: string, patch: Partial<NodeInfo>) {
+let loaded = false;
+
+export function ensureNodesLoaded(): void {
+  if (!apiEnabled || loaded) return;
+  loaded = true;
+  api.listNodes()
+    .then(nodes => nodesStore.set(nodes))
+    .catch(() => {
+      loaded = false;
+    });
+}
+
+export function reloadNodes(): void {
+  loaded = false;
+  ensureNodesLoaded();
+}
+
+export async function updateNode(name: string, patch: Partial<NodeInfo>): Promise<void> {
+  if (apiEnabled) {
+    const updated = await api.patchNode(name, { labels: patch.labels, taints: patch.taints });
+    nodesStore.set(prev => prev.map(n => (n.name === name ? updated : n)));
+    return;
+  }
   nodesStore.set(prev => prev.map(n => (n.name === name ? { ...n, ...patch } : n)));
 }

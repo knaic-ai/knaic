@@ -12,6 +12,7 @@ import (
 	"github.com/alauda/knaic-backend/internal/auth"
 	"github.com/alauda/knaic-backend/internal/components"
 	"github.com/alauda/knaic-backend/internal/inference"
+	"github.com/alauda/knaic-backend/internal/k8s"
 	"github.com/alauda/knaic-backend/internal/k8sres"
 	"github.com/alauda/knaic-backend/internal/models"
 	"github.com/alauda/knaic-backend/internal/monitoring"
@@ -22,18 +23,30 @@ import (
 )
 
 type Deps struct {
-	Verifier    *auth.Verifier
-	Components  *components.Service
-	Registry    *registry.Store
-	K8sRes      *k8sres.Service
-	Admin       *admin.Service
-	Inference   *inference.Service
-	Notebook    *notebook.Service
-	Models      *models.Service
-	Training    *training.Service
-	Monitoring  *monitoring.Service
-	Playground  *playground.Service
-	CORSOrigins []string
+	Verifier      *auth.Verifier
+	AuthProxy     *auth.Proxy
+	AuthConfig    AuthConfig
+	K8s           *k8s.Clients
+	UserClaim     string // OIDC claim used as the impersonated apiserver username
+	UserPrefix    string // optional prefix prepended to the impersonated username
+	Components    *components.Service
+	Registry      *registry.Store
+	K8sRes        *k8sres.Service
+	Admin         *admin.Service
+	Inference     *inference.Service
+	Notebook      *notebook.Service
+	Models        *models.Service
+	Training      *training.Service
+	Monitoring    *monitoring.Service
+	Playground    *playground.Service
+	CORSOrigins   []string
+}
+
+type AuthConfig struct {
+	Issuer      string `json:"issuer"`
+	ClientID    string `json:"clientId"`
+	Scopes      string `json:"scopes"`
+	RedirectURI string `json:"redirectUri,omitempty"`
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -61,82 +74,102 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Use(d.Verifier.Middleware)
+		r.Get("/auth/config", func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, d.AuthConfig)
+		})
+		if d.AuthProxy != nil {
+			// Browser-originating OIDC calls Dex directly are blocked by CORS;
+			// proxy through the API instead so the same TLS config is reused.
+			r.Get("/auth/discovery", d.AuthProxy.Discovery)
+			r.Post("/auth/token", d.AuthProxy.Token)
+		}
 
-		r.Get("/whoami", func(w http.ResponseWriter, req *http.Request) {
-			u := auth.MustFromContext(req.Context())
-			if d.Admin != nil {
-				d.Admin.ObserveUser(u)
+		r.Group(func(r chi.Router) {
+			r.Use(d.Verifier.Middleware)
+
+			r.Get("/whoami", func(w http.ResponseWriter, req *http.Request) {
+				u := auth.MustFromContext(req.Context())
+				if d.Admin != nil {
+					d.Admin.ObserveUser(u)
+				}
+				writeJSON(w, http.StatusOK, u)
+			})
+
+			r.Route("/components", func(r chi.Router) {
+				// Read paths are open to any authenticated user; mutations
+				// require platform-admin.
+				cmp := newComponentsAPI(d.Components)
+				r.Get("/", cmp.list)
+				r.Get("/{name}", cmp.get)
+				r.Group(func(r chi.Router) {
+					r.Use(auth.RequirePlatformAdmin)
+					r.Post("/", cmp.importChart)
+					r.Patch("/{name}", cmp.patch)
+					r.Delete("/{name}", cmp.remove)
+					r.Post("/{name}/install", cmp.install)
+					r.Post("/{name}/uninstall", cmp.uninstall)
+					r.Post("/{name}/reconcile", cmp.reconcile)
+					r.Post("/{name}/adopt", cmp.adopt)
+				})
+			})
+
+			r.Route("/registry", func(r chi.Router) {
+				reg := newRegistryAPI(d.Registry)
+				r.Get("/", reg.get)
+				r.Group(func(r chi.Router) {
+					r.Use(auth.RequirePlatformAdmin)
+					r.Patch("/", reg.patch)
+					r.Post("/sync", reg.sync)
+				})
+			})
+
+			if d.K8sRes != nil {
+				newK8sresAPI(d.K8sRes).routes(r)
 			}
-			writeJSON(w, http.StatusOK, u)
+			if d.Admin != nil {
+				// Lightweight name+status list, used by the namespace selector.
+				// Open to any authenticated user; the heavier admin shape lives
+				// under /admin/namespaces.
+				//
+				// Platform admins get the full SA-backed list so the selector
+				// matches the rest of the admin views. Other users are listed
+				// via apiserver impersonation so K8s RBAC filters the result.
+				r.Get("/namespaces", newMyNamespacesHandler(d))
+				r.Group(func(r chi.Router) {
+					r.Use(auth.RequirePlatformAdmin)
+					newAdminAPI(d.Admin).routes(r)
+				})
+			}
+			if d.Inference != nil {
+				r.Route("/namespaces/{namespace}/inference", func(r chi.Router) {
+					newInferenceAPI(d.Inference).routes(r)
+				})
+			}
+			if d.Notebook != nil {
+				// Mounted under singular "notebook" so it doesn't shadow the
+				// generic /namespaces/{ns}/notebooks list GET handled by the
+				// k8sres dispatcher.
+				r.Route("/namespaces/{namespace}/notebook", func(r chi.Router) {
+					newNotebookAPI(d.Notebook).routes(r)
+				})
+			}
+			if d.Models != nil {
+				r.Route("/models", func(r chi.Router) {
+					newModelsAPI(d.Models).routes(r)
+				})
+			}
+			if d.Training != nil {
+				r.Route("/namespaces/{namespace}/training", func(r chi.Router) {
+					newTrainingAPI(d.Training).routes(r)
+				})
+			}
+			if d.Monitoring != nil {
+				newMonitoringAPI(d.Monitoring).routes(r)
+			}
+			if d.Playground != nil {
+				newPlaygroundAPI(d.Playground).routes(r)
+			}
 		})
-
-		r.Route("/components", func(r chi.Router) {
-			// Read paths are open to any authenticated user; mutations
-			// require platform-admin.
-			cmp := newComponentsAPI(d.Components)
-			r.Get("/", cmp.list)
-			r.Get("/{name}", cmp.get)
-			r.Group(func(r chi.Router) {
-				r.Use(auth.RequirePlatformAdmin)
-				r.Post("/", cmp.importChart)
-				r.Patch("/{name}", cmp.patch)
-				r.Delete("/{name}", cmp.remove)
-				r.Post("/{name}/install", cmp.install)
-				r.Post("/{name}/uninstall", cmp.uninstall)
-				r.Post("/{name}/reconcile", cmp.reconcile)
-				r.Post("/{name}/adopt", cmp.adopt)
-			})
-		})
-
-		r.Route("/registry", func(r chi.Router) {
-			reg := newRegistryAPI(d.Registry)
-			r.Get("/", reg.get)
-			r.Group(func(r chi.Router) {
-				r.Use(auth.RequirePlatformAdmin)
-				r.Patch("/", reg.patch)
-				r.Post("/sync", reg.sync)
-			})
-		})
-
-		if d.K8sRes != nil {
-			newK8sresAPI(d.K8sRes).routes(r)
-		}
-		if d.Admin != nil {
-			r.Group(func(r chi.Router) {
-				r.Use(auth.RequirePlatformAdmin)
-				newAdminAPI(d.Admin).routes(r)
-			})
-		}
-		if d.Inference != nil {
-			r.Route("/namespaces/{namespace}/inference", func(r chi.Router) {
-				newInferenceAPI(d.Inference).routes(r)
-			})
-		}
-		if d.Notebook != nil {
-			// Mounted under singular "notebook" so it doesn't shadow the
-			// generic /namespaces/{ns}/notebooks list GET handled by the
-			// k8sres dispatcher.
-			r.Route("/namespaces/{namespace}/notebook", func(r chi.Router) {
-				newNotebookAPI(d.Notebook).routes(r)
-			})
-		}
-		if d.Models != nil {
-			r.Route("/models", func(r chi.Router) {
-				newModelsAPI(d.Models).routes(r)
-			})
-		}
-		if d.Training != nil {
-			r.Route("/namespaces/{namespace}/training", func(r chi.Router) {
-				newTrainingAPI(d.Training).routes(r)
-			})
-		}
-		if d.Monitoring != nil {
-			newMonitoringAPI(d.Monitoring).routes(r)
-		}
-		if d.Playground != nil {
-			newPlaygroundAPI(d.Playground).routes(r)
-		}
 	})
 
 	return r

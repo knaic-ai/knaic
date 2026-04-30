@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Table, Button, Space, Modal, Form, Input, InputNumber, App, Tag, Select } from 'antd';
 import { PlusOutlined, UserAddOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { useApp, type NamespaceRole } from '@/context/AppContext';
-import { useUsers, usersStore } from '@/data/users';
+import { ensureUsersLoaded, updateUser, useUsers } from '@/data/users';
 import { createStore, useStore } from '@/data/store';
+import { apiEnabled } from '@/api/client';
+import * as adminApi from '@/api/admin';
 
 interface NsQuota {
   name: string;
@@ -42,6 +44,28 @@ export function NamespacesPage() {
   const data = namespaces.map(
     n => quotas[n] ?? { name: n, cpu: 0, memory: 0, gpu: 0, pods: 0 },
   );
+
+  useEffect(() => {
+    ensureUsersLoaded();
+    if (!apiEnabled) return;
+    void adminApi.listNamespaces()
+      .then(remote => {
+        nsQuotasStore.set(prev => ({
+          ...prev,
+          ...Object.fromEntries(remote.map(ns => [
+            ns.name,
+            {
+              name: ns.name,
+              cpu: ns.quota.cpu,
+              memory: ns.quota.memory,
+              gpu: ns.quota.gpu,
+              pods: ns.quota.pods,
+            },
+          ])),
+        }));
+      })
+      .catch(() => undefined);
+  }, []);
 
   function membersIn(ns: string) {
     return users
@@ -103,9 +127,20 @@ export function NamespacesPage() {
                     modal.confirm({
                       title: `Delete namespace ${r.name}?`,
                       content: 'All workloads and memberships in this namespace will be detached.',
-                      onOk: () => {
-                        removeNamespace(r.name);
-                        message.success('Namespace deleted');
+                      onOk: async () => {
+                        try {
+                          if (apiEnabled) await adminApi.deleteNamespace(r.name);
+                          removeNamespace(r.name);
+                          nsQuotasStore.set(prev => {
+                            const next = { ...prev };
+                            delete next[r.name];
+                            return next;
+                          });
+                          message.success('Namespace deleted');
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : 'Failed to delete namespace');
+                          throw err;
+                        }
                       },
                     })
                   }
@@ -123,11 +158,23 @@ export function NamespacesPage() {
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields();
-          addNamespace(v.name);
-          nsQuotasStore.set(prev => ({ ...prev, [v.name]: v }));
-          setCreateOpen(false);
-          form.resetFields();
-          message.success(`Namespace ${v.name} created`);
+          try {
+            const created = apiEnabled
+              ? await adminApi.createNamespace({
+                name: v.name,
+                quota: { cpu: v.cpu, memory: v.memory, gpu: v.gpu, pods: v.pods },
+              })
+              : null;
+            const name = created?.name ?? v.name;
+            const quota = created?.quota ?? { cpu: v.cpu, memory: v.memory, gpu: v.gpu, pods: v.pods };
+            addNamespace(name);
+            nsQuotasStore.set(prev => ({ ...prev, [name]: { name, ...quota } }));
+            setCreateOpen(false);
+            form.resetFields();
+            message.success(`Namespace ${name} created`);
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to create namespace');
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>
@@ -170,12 +217,16 @@ export function NamespacesPage() {
                     <Select
                       size="small"
                       value={r.role}
-                      onChange={role => {
-                        usersStore.set(prev => prev.map(u =>
-                          u.name === r.user.name
-                            ? { ...u, memberships: { ...u.memberships, [membersNs]: role as NamespaceRole } }
-                            : u,
-                        ));
+                      onChange={async role => {
+                        const memberships = { ...r.user.memberships, [membersNs]: role as NamespaceRole };
+                        try {
+                          await updateUser(r.user.id, {
+                            isPlatformAdmin: r.user.isPlatformAdmin,
+                            memberships,
+                          });
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : 'Failed to update member');
+                        }
                       }}
                       options={[
                         { label: 'Admin', value: 'admin' },
@@ -194,13 +245,17 @@ export function NamespacesPage() {
                       size="small"
                       danger
                       icon={<DeleteOutlined />}
-                      onClick={() => {
-                        usersStore.set(prev => prev.map(u => {
-                          if (u.name !== r.user.name) return u;
-                          const m = { ...u.memberships };
-                          delete m[membersNs];
-                          return { ...u, memberships: m };
-                        }));
+                      onClick={async () => {
+                        const memberships = { ...r.user.memberships };
+                        delete memberships[membersNs];
+                        try {
+                          await updateUser(r.user.id, {
+                            isPlatformAdmin: r.user.isPlatformAdmin,
+                            memberships,
+                          });
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : 'Failed to remove member');
+                        }
                       }}
                     />
                   ),
@@ -218,14 +273,19 @@ export function NamespacesPage() {
         destroyOnClose
         onOk={async () => {
           const v = await assignForm.validateFields();
-          usersStore.set(prev => prev.map(u =>
-            u.name === v.user
-              ? { ...u, memberships: { ...u.memberships, [membersNs!]: v.role as NamespaceRole } }
-              : u,
-          ));
-          setAssignOpen(false);
-          assignForm.resetFields();
-          message.success(`${v.user} added as ${v.role}`);
+          const selected = users.find(u => u.name === v.user);
+          if (!selected) return;
+          try {
+            await updateUser(selected.id, {
+              isPlatformAdmin: selected.isPlatformAdmin,
+              memberships: { ...selected.memberships, [membersNs!]: v.role as NamespaceRole },
+            });
+            setAssignOpen(false);
+            assignForm.resetFields();
+            message.success(`${v.user} added as ${v.role}`);
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to add member');
+          }
         }}
       >
         <Form form={assignForm} layout="vertical" preserve={false}>

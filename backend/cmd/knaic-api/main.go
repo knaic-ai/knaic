@@ -52,6 +52,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	var authProxy *auth.Proxy
+	if !cfg.AuthDisabled {
+		authProxy, err = auth.NewProxy(ctx, cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.OIDCInsecureSkipVerify)
+		if err != nil {
+			log.Warn("oidc proxy init failed; frontend will fall back to direct issuer calls", "err", err)
+		}
+	}
+
 	clients, err := k8s.New(cfg.KubeconfigPath)
 	if err != nil {
 		// Fail-soft so the binary still serves /healthz when no cluster is
@@ -118,6 +126,11 @@ func main() {
 
 	router := api.NewRouter(api.Deps{
 		Verifier:    verifier,
+		AuthProxy:   authProxy,
+		AuthConfig:  api.AuthConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, Scopes: cfg.OIDCScopes, RedirectURI: cfg.OIDCRedirectURI},
+		K8s:         clients,
+		UserClaim:   cfg.OIDCUsernameClaim,
+		UserPrefix:  cfg.OIDCUsernamePrefix,
 		Components:  compSvc,
 		Registry:    regStore,
 		K8sRes:      resSvc,

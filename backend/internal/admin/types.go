@@ -33,6 +33,14 @@ type Quota struct {
 	Pods     int64 `json:"pods"`
 }
 
+// NamespaceRef is the lightweight projection used by the namespace selector.
+// Available to any authenticated user; the heavier Namespace shape (quota,
+// labels) stays gated to platform admins.
+type NamespaceRef struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
 type Namespace struct {
 	Name   string            `json:"name"`
 	Status string            `json:"status"`

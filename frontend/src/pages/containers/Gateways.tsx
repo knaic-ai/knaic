@@ -1,16 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Table, Space, Button, App, Tag } from 'antd';
 import { CodeOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
 import { YamlViewer } from '@/components/YamlViewer';
 import {
-  useGateways,
-  useHTTPRoutes,
-  gatewaysStore,
-  httpRoutesStore,
   buildGatewayYaml,
   buildHTTPRouteYaml,
+  deleteClusterResource,
+  ensureGatewaysLoaded,
+  fetchClusterResourceYaml,
+  useGateways,
+  useHTTPRoutes,
   type Gateway,
   type HTTPRoute,
 } from '@/data/clusterResources';
@@ -24,6 +25,20 @@ export function Gateways() {
   const gwData = useMemo(() => gws.filter(g => g.namespace === namespace), [gws, namespace]);
   const routeData = useMemo(() => routes.filter(r => r.namespace === namespace), [routes, namespace]);
   const [yaml, setYaml] = useState<{ title: string; body: string } | null>(null);
+
+  useEffect(() => {
+    ensureGatewaysLoaded(namespace);
+  }, [namespace]);
+
+  async function showYaml(slug: 'gateways' | 'httproutes', name: string, fallback: string, title: string) {
+    try {
+      const body = await fetchClusterResourceYaml(slug, namespace, name, fallback);
+      setYaml({ title, body });
+    } catch (err) {
+      setYaml({ title, body: fallback });
+      message.error(err instanceof Error ? err.message : 'Failed to fetch YAML');
+    }
+  }
 
   return (
     <div className="knaic-page">
@@ -61,7 +76,13 @@ export function Gateways() {
                   width: 140,
                   render: (_, r) => (
                     <Space>
-                      <Button size="small" icon={<CodeOutlined />} onClick={() => setYaml({ title: `Gateway · ${r.name}`, body: buildGatewayYaml(r) })}>YAML</Button>
+                      <Button
+                        size="small"
+                        icon={<CodeOutlined />}
+                        onClick={() => void showYaml('gateways', r.name, buildGatewayYaml(r), `Gateway · ${r.name}`)}
+                      >
+                        YAML
+                      </Button>
                       <Button
                         size="small"
                         danger
@@ -69,9 +90,14 @@ export function Gateways() {
                         onClick={() =>
                           modal.confirm({
                             title: `Delete Gateway ${r.name}?`,
-                            onOk: () => {
-                              gatewaysStore.set(prev => prev.filter(x => x.id !== r.id));
-                              message.success('Deleted');
+                            onOk: async () => {
+                              try {
+                                await deleteClusterResource('gateways', r.namespace, r.name);
+                                message.success('Deleted');
+                              } catch (err) {
+                                message.error(err instanceof Error ? err.message : 'Failed to delete Gateway');
+                                throw err;
+                              }
                             },
                           })
                         }
@@ -112,7 +138,13 @@ export function Gateways() {
                   width: 140,
                   render: (_, r) => (
                     <Space>
-                      <Button size="small" icon={<CodeOutlined />} onClick={() => setYaml({ title: `HTTPRoute · ${r.name}`, body: buildHTTPRouteYaml(r) })}>YAML</Button>
+                      <Button
+                        size="small"
+                        icon={<CodeOutlined />}
+                        onClick={() => void showYaml('httproutes', r.name, buildHTTPRouteYaml(r), `HTTPRoute · ${r.name}`)}
+                      >
+                        YAML
+                      </Button>
                       <Button
                         size="small"
                         danger
@@ -120,9 +152,14 @@ export function Gateways() {
                         onClick={() =>
                           modal.confirm({
                             title: `Delete HTTPRoute ${r.name}?`,
-                            onOk: () => {
-                              httpRoutesStore.set(prev => prev.filter(x => x.id !== r.id));
-                              message.success('Deleted');
+                            onOk: async () => {
+                              try {
+                                await deleteClusterResource('httproutes', r.namespace, r.name);
+                                message.success('Deleted');
+                              } catch (err) {
+                                message.error(err instanceof Error ? err.message : 'Failed to delete HTTPRoute');
+                                throw err;
+                              }
                             },
                           })
                         }

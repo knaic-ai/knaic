@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { MainLayout } from './layouts/MainLayout';
+import { AuthCallback, AuthGate } from './auth/AuthContext';
 import { Dashboard } from './pages/Dashboard';
 import { ComponentsPage } from './pages/admin/Components';
 import { NamespacesPage } from './pages/admin/Namespaces';
@@ -32,7 +33,8 @@ import { NotebooksPage } from './pages/notebooks/Notebooks';
 export default function App() {
   return (
     <Routes>
-      <Route element={<MainLayout />}>
+      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route element={<AuthGate><MainLayout /></AuthGate>}>
         <Route index element={<Dashboard />} />
         <Route path="/admin/components" element={<ComponentsPage />} />
         <Route path="/admin/registry" element={<RegistryPage />} />

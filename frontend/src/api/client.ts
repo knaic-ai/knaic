@@ -2,13 +2,12 @@
 //
 // Resolution order for the base URL:
 //   1. import.meta.env.VITE_KNAIC_API  (e.g. "http://localhost:8080")
-//   2. window.__KNAIC_API__            (set by index.html when served by the
-//      backend itself in production)
-//   3. ""                              (use same-origin /api/v1, with the
-//      vite dev proxy forwarding to the backend on :8080)
+//   2. window.__KNAIC_API__            (runtime override)
+//   3. ""                              (same-origin /api/v1; Vite proxies
+//      /api to the backend in local development)
 //
-// When `apiEnabled` is false (no backend reachable) callers should fall back
-// to the in-memory prototype data. Each data store decides this for itself.
+// API mode is enabled by default so production same-origin deployments do not
+// accidentally bypass OIDC. Set VITE_KNAIC_API=disabled for prototype-only UI.
 
 declare global {
   interface Window {
@@ -16,20 +15,25 @@ declare global {
   }
 }
 
-const envBase: string | undefined = import.meta.env.VITE_KNAIC_API as string | undefined;
-const winBase: string | undefined = typeof window !== 'undefined' ? window.__KNAIC_API__ : undefined;
+const rawEnvBase: string | undefined = import.meta.env.VITE_KNAIC_API as string | undefined;
+const rawWinBase: string | undefined = typeof window !== 'undefined' ? window.__KNAIC_API__ : undefined;
+const apiDisabled = rawEnvBase === 'disabled' || rawWinBase === 'disabled';
+const envBase = apiDisabled ? undefined : rawEnvBase;
+const winBase = apiDisabled ? undefined : rawWinBase;
 
 export const apiBaseUrl: string = (envBase ?? winBase ?? '').replace(/\/+$/, '');
 
-// In dev, the vite proxy in vite.config.ts forwards /api/v1 → :8080 even
-// when VITE_KNAIC_API is unset, so we still consider the API "enabled".
-export const apiEnabled: boolean =
-  import.meta.env.DEV || !!envBase || !!winBase;
+export const apiEnabled: boolean = !apiDisabled;
 
 let bearerToken: string | null = null;
+let unauthorizedHandler: (() => void) | null = null;
 
 export function setBearerToken(token: string | null) {
   bearerToken = token;
+}
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
 }
 
 export class ApiError extends Error {
@@ -43,20 +47,38 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   signal?: AbortSignal;
+  skipUnauthorizedHandler?: boolean;
+}
+
+export function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra ?? {}) };
+  if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+  return headers;
+}
+
+export function fetchWithAuth(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = authHeaders(init.headers ? Object.fromEntries(new Headers(init.headers).entries()) : undefined);
+  return fetch(`${apiBaseUrl}${path}`, {
+    ...init,
+    headers,
+    credentials: init.credentials ?? 'include',
+  }).then(res => {
+    if (res.status === 401) unauthorizedHandler?.();
+    return res;
+  });
 }
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const url = `${apiBaseUrl}${path}`;
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-  if (bearerToken) headers['Authorization'] = `Bearer ${bearerToken}`;
 
   const res = await fetch(url, {
     method: opts.method ?? 'GET',
-    headers,
+    headers: authHeaders(headers),
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     signal: opts.signal,
     credentials: 'include',
@@ -75,6 +97,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
 
   if (!res.ok) {
+    if (res.status === 401 && !opts.skipUnauthorizedHandler) unauthorizedHandler?.();
     const msg =
       parsed && typeof parsed === 'object' && 'error' in parsed
         ? String((parsed as { error: unknown }).error)
@@ -82,4 +105,10 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
     throw new ApiError(res.status, msg, parsed);
   }
   return parsed as T;
+}
+
+export async function requestText(path: string, init: RequestInit = {}): Promise<string> {
+  const res = await fetchWithAuth(path, init);
+  if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`, await res.text());
+  return res.text();
 }

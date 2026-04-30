@@ -19,6 +19,22 @@ type Clients struct {
 	RESTGetter genericclioptions.RESTClientGetter
 }
 
+// Impersonate returns a typed client that talks to the apiserver as the named
+// user/groups via the standard impersonation headers. Requires the backend's
+// service account to hold a ClusterRole granting `impersonate` on
+// users/groups/serviceaccounts in `authentication.k8s.io` (or be cluster-admin).
+func (c *Clients) Impersonate(userName string, groups []string) (kubernetes.Interface, error) {
+	if c == nil || c.Config == nil {
+		return nil, fmt.Errorf("k8s clients not initialized")
+	}
+	cfg := rest.CopyConfig(c.Config)
+	cfg.Impersonate = rest.ImpersonationConfig{
+		UserName: userName,
+		Groups:   groups,
+	}
+	return kubernetes.NewForConfig(cfg)
+}
+
 // New returns a Clients bundle. If kubeconfigPath is empty, in-cluster config
 // is used; if that fails, the default ~/.kube/config is loaded.
 func New(kubeconfigPath string) (*Clients, error) {

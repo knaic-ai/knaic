@@ -1,4 +1,6 @@
 import { createStore, useStore, uid } from './store';
+import { apiEnabled } from '@/api/client';
+import * as api from '@/api/playground';
 
 export interface LLMProvider {
   id: string;
@@ -47,3 +49,53 @@ const initial: LLMProvider[] = [
 
 export const providersStore = createStore<LLMProvider[]>(initial);
 export const useProviders = () => useStore(providersStore);
+
+let loadedKey: string | null = null;
+
+export function ensureProvidersLoaded(namespace?: string): void {
+  if (!apiEnabled) return;
+  const key = namespace ?? '';
+  if (loadedKey === key) return;
+  loadedKey = key;
+  api.listProviders(namespace)
+    .then(providers => providersStore.set(providers))
+    .catch(() => {
+      loadedKey = null;
+    });
+}
+
+export function reloadProviders(namespace?: string): void {
+  loadedKey = null;
+  ensureProvidersLoaded(namespace);
+}
+
+export async function addProvider(req: Omit<LLMProvider, 'id'>): Promise<void> {
+  if (apiEnabled) {
+    const created = await api.createProvider(req);
+    providersStore.set(prev => [created, ...prev.filter(p => p.id !== created.id)]);
+    return;
+  }
+  providersStore.set(prev => [{ id: uid('llm'), ...req }, ...prev]);
+}
+
+export async function removeProvider(id: string): Promise<void> {
+  if (apiEnabled) await api.deleteProvider(id);
+  providersStore.set(prev => prev.filter(p => p.id !== id));
+}
+
+export async function replaceClusterProviders(providers: Omit<LLMProvider, 'id'>[], namespace?: string): Promise<void> {
+  if (apiEnabled) {
+    const current = providersStore.get().filter(p => p.source === 'cluster' && (!namespace || p.namespace === namespace));
+    await Promise.all(current.map(p => api.deleteProvider(p.id).catch(() => undefined)));
+    const created = await Promise.all(providers.map(p => api.createProvider(p)));
+    providersStore.set(prev => [
+      ...created,
+      ...prev.filter(p => !(p.source === 'cluster' && (!namespace || p.namespace === namespace))),
+    ]);
+    return;
+  }
+  providersStore.set(prev => [
+    ...providers.map(p => ({ id: uid('llm'), ...p })),
+    ...prev.filter(p => !(p.source === 'cluster' && (!namespace || p.namespace === namespace))),
+  ]);
+}

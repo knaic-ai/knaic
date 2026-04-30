@@ -5,6 +5,7 @@ import { BrowserRouter } from 'react-router-dom';
 import enUS from 'antd/locale/en_US';
 import App from './App';
 import { buildTheme } from './theme';
+import { AuthProvider } from './auth/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import './index.css';
 
@@ -22,9 +23,11 @@ function ThemedApp() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <AppProvider>
-        <ThemedApp />
-      </AppProvider>
+      <AuthProvider>
+        <AppProvider>
+          <ThemedApp />
+        </AppProvider>
+      </AuthProvider>
     </BrowserRouter>
   </React.StrictMode>,
 );

@@ -1,4 +1,15 @@
 import { createStore, useStore, uid } from './store';
+import { apiEnabled } from '@/api/client';
+import {
+  createTrainJob as apiCreateJob,
+  createTrainingRuntime as apiCreateRuntime,
+  fetchMLflowRun,
+  listTrainJobs as apiListJobs,
+  listTrainingRuntimes as apiListRuntimes,
+  type CreateJobRequest,
+  type CreateRuntimeRequest,
+} from '@/api/training';
+import { createCluster, deleteCluster, deleteNamespaced, listCluster } from '@/api/k8sres';
 
 export type TrainingFramework = 'torch' | 'deepspeed' | 'mpi' | 'tensorflow' | 'jax';
 
@@ -173,3 +184,189 @@ export const trainingRuntimesStore = createStore<TrainingRuntime[]>(runtimesInit
 export const trainJobsStore = createStore<TrainJob[]>(jobsInitial);
 export const useTrainingRuntimes = () => useStore(trainingRuntimesStore);
 export const useTrainJobs = () => useStore(trainJobsStore);
+
+const loaded = new Set<string>();
+
+function fillRuntimeDefaults(r: TrainingRuntime): TrainingRuntime {
+  return {
+    ...r,
+    id: r.id || `tr-${r.namespace}-${r.name}`,
+    resourcesPerNode: r.resourcesPerNode ?? { cpu: '', memory: '', gpu: 0 },
+    builtin: r.builtin ?? false,
+  };
+}
+
+function fillJobDefaults(j: TrainJob): TrainJob {
+  return {
+    ...j,
+    id: j.id || `tj-${j.namespace}-${j.name}`,
+    command: j.command ?? [],
+    status: j.status ?? 'Pending',
+    progress: j.progress ?? 0,
+    duration: j.duration ?? '',
+    cpu: j.cpu ?? '',
+    memory: j.memory ?? '',
+  };
+}
+
+export function ensureTrainingRuntimesLoaded(ns: string): void {
+  if (!apiEnabled) return;
+  const key = `tr:${ns}`;
+  if (loaded.has(key)) return;
+  loaded.add(key);
+  Promise.all([
+    apiListRuntimes(ns).catch(() => []),
+    listCluster<TrainingRuntime>('clustertrainingruntimes').catch(() => []),
+  ])
+    .then(([namespaced, cluster]) => {
+      trainingRuntimesStore.set(prev => {
+        const builtin = cluster.length > 0
+          ? cluster.map(r => fillRuntimeDefaults({ ...r, namespace: 'knaic-system', builtin: true }))
+          : prev.filter(r => r.builtin);
+        return [
+          ...prev.filter(r => r.namespace !== ns && !r.builtin),
+          ...builtin,
+          ...namespaced.map(fillRuntimeDefaults),
+        ];
+      });
+    })
+    .catch(() => loaded.delete(key));
+}
+
+export function reloadTrainingRuntimes(ns: string): void {
+  loaded.delete(`tr:${ns}`);
+  ensureTrainingRuntimesLoaded(ns);
+}
+
+export function ensureTrainJobsLoaded(ns: string): void {
+  if (!apiEnabled) return;
+  const key = `tj:${ns}`;
+  if (loaded.has(key)) return;
+  loaded.add(key);
+  apiListJobs(ns)
+    .then(async items => {
+      const filled = await Promise.all(items.map(async item => {
+        const job = fillJobDefaults(item);
+        if (!job.mlflow) return job;
+        try {
+          const run = await fetchMLflowRun(ns, job.name);
+          return { ...job, mlflow: { ...run } };
+        } catch {
+          return job;
+        }
+      }));
+      trainJobsStore.set(prev => [...prev.filter(j => j.namespace !== ns), ...filled]);
+    })
+    .catch(() => loaded.delete(key));
+}
+
+export function reloadTrainJobs(ns: string): void {
+  loaded.delete(`tj:${ns}`);
+  ensureTrainJobsLoaded(ns);
+}
+
+export async function createTrainingRuntime(ns: string, req: CreateRuntimeRequest & { cluster?: boolean }): Promise<void> {
+  if (apiEnabled) {
+    if (req.cluster) {
+      await createCluster<TrainingRuntime>('clustertrainingruntimes', trainingRuntimeObject(req));
+    } else {
+      await apiCreateRuntime(ns, req);
+    }
+    reloadTrainingRuntimes(ns);
+    return;
+  }
+  trainingRuntimesStore.set(prev => [
+    {
+      id: uid('tr'),
+      name: req.name,
+      namespace: req.cluster ? 'knaic-system' : ns,
+      framework: req.framework as TrainingFramework,
+      image: req.image,
+      numNodes: req.numNodes,
+      resourcesPerNode: { cpu: req.cpuLimit ?? '', memory: req.memoryLimit ?? '', gpu: req.gpuLimit ?? 0 },
+      createdAt: new Date().toISOString().slice(0, 10),
+      builtin: false,
+    },
+    ...prev,
+  ]);
+}
+
+export async function deleteTrainingRuntime(ns: string, runtime: TrainingRuntime): Promise<void> {
+  if (apiEnabled) {
+    if (runtime.builtin) {
+      await deleteCluster('clustertrainingruntimes', runtime.name);
+    } else {
+      await deleteNamespaced('trainingruntimes', ns, runtime.name);
+    }
+  }
+  trainingRuntimesStore.set(prev => prev.filter(r => r.id !== runtime.id));
+}
+
+export async function createTrainJob(ns: string, req: CreateJobRequest): Promise<void> {
+  if (apiEnabled) {
+    await apiCreateJob(ns, req);
+    reloadTrainJobs(ns);
+    return;
+  }
+  const job: TrainJob = {
+    id: uid('tj'),
+    name: req.name,
+    namespace: ns,
+    runtime: req.runtime,
+    numNodes: req.numNodes,
+    command: req.command ?? [],
+    args: req.args,
+    env: req.env,
+    status: 'Running',
+    progress: 1,
+    startTime: new Date().toISOString(),
+    duration: '00h 00m',
+    modelUri: req.modelUri,
+    datasetUri: req.datasetUri,
+    cpu: req.cpuRequest,
+    cpuLimit: req.cpuLimit,
+    memory: req.memoryRequest,
+    memoryLimit: req.memoryLimit,
+    gpuValues: req.gpuValues,
+  };
+  trainJobsStore.set(prev => [job, ...prev]);
+}
+
+export async function deleteTrainJob(ns: string, job: TrainJob): Promise<void> {
+  if (apiEnabled) await deleteNamespaced('trainjobs', ns, job.name);
+  trainJobsStore.set(prev => prev.filter(j => j.id !== job.id));
+}
+
+function trainingRuntimeObject(req: CreateRuntimeRequest) {
+  const limits: Record<string, string | number> = {};
+  if (req.cpuLimit) limits.cpu = req.cpuLimit;
+  if (req.memoryLimit) limits.memory = req.memoryLimit;
+  if (req.gpuLimit) limits['nvidia.com/gpu'] = req.gpuLimit;
+  return {
+    apiVersion: 'trainer.kubeflow.org/v1alpha1',
+    kind: 'ClusterTrainingRuntime',
+    metadata: {
+      name: req.name,
+      labels: { 'knaic.io/managed': 'true', 'knaic.io/component': 'training', 'knaic.io/framework': req.framework },
+    },
+    spec: {
+      mlPolicy: { numNodes: req.numNodes || 1, [req.framework || 'torch']: {} },
+      template: {
+        spec: {
+          replicatedJobs: [{
+            name: 'trainer',
+            template: {
+              spec: {
+                template: {
+                  spec: {
+                    containers: [{ name: 'trainer', image: req.image, resources: { limits } }],
+                  },
+                },
+              },
+            },
+          }],
+        },
+      },
+    },
+  };
+}

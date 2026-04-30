@@ -1,13 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Table, Tag, Space, Button, App, Modal, Form, Input, InputNumber, Select, Switch } from 'antd';
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import {
-  trainingRuntimesStore,
+  createTrainingRuntime,
+  deleteTrainingRuntime,
+  ensureTrainingRuntimesLoaded,
   useTrainingRuntimes,
   type TrainingFramework,
 } from '@/data/training';
-import { uid } from '@/data/store';
 import { useApp } from '@/context/AppContext';
 
 const FRAMEWORKS: TrainingFramework[] = ['torch', 'deepspeed', 'mpi', 'tensorflow', 'jax'];
@@ -30,6 +31,10 @@ export function TrainingRuntimesPage() {
   );
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
+
+  useEffect(() => {
+    ensureTrainingRuntimesLoaded(namespace);
+  }, [namespace]);
 
   return (
     <div className="knaic-page">
@@ -87,9 +92,14 @@ export function TrainingRuntimesPage() {
                       content: r.builtin
                         ? 'This is a builtin ClusterTrainingRuntime — removing it will affect all namespaces.'
                         : undefined,
-                      onOk: () => {
-                        trainingRuntimesStore.set(prev => prev.filter(x => x.id !== r.id));
-                        message.success('Runtime deleted');
+                      onOk: async () => {
+                        try {
+                          await deleteTrainingRuntime(namespace, r);
+                          message.success('Runtime deleted');
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : 'Failed to delete runtime');
+                          throw err;
+                        }
                       },
                     })
                   }
@@ -106,23 +116,23 @@ export function TrainingRuntimesPage() {
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields();
-          trainingRuntimesStore.set(prev => [
-            {
-              id: uid('tr'),
+          try {
+            await createTrainingRuntime(namespace, {
               name: v.name,
-              namespace: v.cluster ? 'knaic-system' : namespace,
               framework: v.framework,
               image: v.image,
               numNodes: v.numNodes,
-              resourcesPerNode: { cpu: v.cpu, memory: v.memory, gpu: v.gpu },
-              createdAt: new Date().toISOString().slice(0, 10),
-              builtin: false,
-            },
-            ...prev,
-          ]);
-          setOpen(false);
-          form.resetFields();
-          message.success('TrainingRuntime created');
+              cpuLimit: v.cpu,
+              memoryLimit: v.memory,
+              gpuLimit: v.gpu,
+              cluster: v.cluster,
+            });
+            setOpen(false);
+            form.resetFields();
+            message.success('TrainingRuntime created');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to create TrainingRuntime');
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false}>

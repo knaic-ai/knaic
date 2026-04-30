@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Table, Tag, Space, Button, Progress, App, Modal, Form, Input, InputNumber, Select,
-  Tabs, Card, Row, Col, Empty, Collapse,
+  Tabs, Card, Row, Col, Empty, Collapse, Tooltip as AntTooltip,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, FileTextOutlined, StopOutlined,
@@ -13,17 +13,22 @@ import {
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
 import {
+  createTrainJob,
+  deleteTrainJob,
+  ensureTrainJobsLoaded,
+  ensureTrainingRuntimesLoaded,
   trainJobsStore,
   useTrainJobs,
   useTrainingRuntimes,
   type TrainJob,
 } from '@/data/training';
-import { uid } from '@/data/store';
+import { ensurePodsLoaded, usePods, type Pod } from '@/data/workloads';
 import { useApp } from '@/context/AppContext';
 import { useModels } from '@/data/models';
 import { LogViewer } from '@/components/LogViewer';
 import { GPUProfileFields } from '@/components/GPUProfileFields';
 import { useGPUProfiles } from '@/data/gpuProfiles';
+import { apiEnabled } from '@/api/client';
 
 interface FormShape {
   name: string;
@@ -48,17 +53,24 @@ export function TrainJobsPage() {
   const { namespace } = useApp();
   const { message, modal } = App.useApp();
   const all = useTrainJobs();
+  const pods = usePods();
   const runtimes = useTrainingRuntimes();
   const models = useModels();
   const profiles = useGPUProfiles();
   const data = useMemo(() => all.filter(j => j.namespace === namespace), [all, namespace]);
   const [open, setOpen] = useState(false);
-  const [log, setLog] = useState<TrainJob | null>(null);
+  const [log, setLog] = useState<{ job: TrainJob; pod?: Pod } | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [form] = Form.useForm<FormShape>();
 
   const cpuReq = Form.useWatch('cpuRequest', form);
   const memReq = Form.useWatch('memoryRequest', form);
+
+  useEffect(() => {
+    ensureTrainingRuntimesLoaded(namespace);
+    ensureTrainJobsLoaded(namespace);
+    ensurePodsLoaded(namespace);
+  }, [namespace]);
 
   useEffect(() => {
     if (!open) return;
@@ -74,6 +86,9 @@ export function TrainJobsPage() {
   const modelOpts = models
     .filter(m => m.scope === 'public' || (m.scope === 'private' && m.namespace === namespace))
     .map(m => ({ label: `${m.name} — ${m.uri}`, value: m.uri }));
+
+  const podFor = (job: TrainJob) =>
+    pods.find(p => p.namespace === job.namespace && p.ownerRef === `TrainJob/${job.name}`);
 
   const tracedJobs = data.filter(j => j.mlflow);
   const compared = tracedJobs.filter(j => compareIds.includes(j.id));
@@ -164,18 +179,34 @@ export function TrainJobsPage() {
                     width: 220,
                     render: (_, r) => (
                       <Space>
-                        <Button size="small" icon={<FileTextOutlined />} onClick={() => setLog(r)}>Logs</Button>
+                        <Button
+                          size="small"
+                          icon={<FileTextOutlined />}
+                          onClick={() => {
+                            const pod = podFor(r);
+                            if (apiEnabled && !pod) {
+                              message.warning('No pod found for this TrainJob');
+                              return;
+                            }
+                            setLog({ job: r, pod });
+                          }}
+                        >
+                          Logs
+                        </Button>
                         {r.status === 'Running' && (
-                          <Button
-                            size="small"
-                            icon={<StopOutlined />}
-                            onClick={() => {
-                              trainJobsStore.set(prev => prev.map(x => (x.id === r.id ? { ...x, status: 'Failed' } : x)));
-                              message.warning('Train job canceled');
-                            }}
-                          >
-                            Cancel
-                          </Button>
+                          <AntTooltip title={apiEnabled ? 'Cancel is not exposed by the backend API yet' : ''}>
+                            <Button
+                              size="small"
+                              icon={<StopOutlined />}
+                              disabled={apiEnabled}
+                              onClick={() => {
+                                trainJobsStore.set(prev => prev.map(x => (x.id === r.id ? { ...x, status: 'Failed' } : x)));
+                                message.warning('Train job canceled');
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </AntTooltip>
                         )}
                         <Button
                           size="small"
@@ -184,9 +215,14 @@ export function TrainJobsPage() {
                           onClick={() =>
                             modal.confirm({
                               title: `Delete job ${r.name}?`,
-                              onOk: () => {
-                                trainJobsStore.set(prev => prev.filter(x => x.id !== r.id));
-                                message.success('Deleted');
+                              onOk: async () => {
+                                try {
+                                  await deleteTrainJob(namespace, r);
+                                  message.success('Deleted');
+                                } catch (err) {
+                                  message.error(err instanceof Error ? err.message : 'Failed to delete TrainJob');
+                                  throw err;
+                                }
                               },
                             })
                           }
@@ -322,32 +358,28 @@ export function TrainJobsPage() {
           const v = await form.validateFields();
           const profile = profiles.find(p => p.id === v.gpuProfileId);
           const gpuValues = profile && v.gpuValues ? v.gpuValues : undefined;
-          const job: TrainJob = {
-            id: uid('tj'),
-            name: v.name,
-            namespace,
-            runtime: v.runtime,
-            numNodes: v.numNodes,
-            command: v.command.trim().split(/\s+/).filter(Boolean),
-            args: v.args ? v.args.split('\n').map(s => s.trim()).filter(Boolean) : undefined,
-            env: v.env,
-            status: 'Running',
-            progress: 1,
-            startTime: new Date().toISOString(),
-            duration: '00h 00m',
-            modelUri: v.modelUri,
-            datasetUri: v.datasetUri,
-            cpu: v.cpuRequest,
-            cpuLimit: v.cpuLimit,
-            memory: v.memoryRequest,
-            memoryLimit: v.memoryLimit,
-            gpuProfileId: v.gpuProfileId,
-            gpuValues,
-          };
-          trainJobsStore.set(prev => [job, ...prev]);
-          setOpen(false);
-          form.resetFields();
-          message.success('TrainJob submitted');
+          try {
+            await createTrainJob(namespace, {
+              name: v.name,
+              runtime: v.runtime,
+              numNodes: v.numNodes,
+              command: v.command.trim().split(/\s+/).filter(Boolean),
+              args: v.args ? v.args.split('\n').map(s => s.trim()).filter(Boolean) : undefined,
+              env: v.env,
+              modelUri: v.modelUri,
+              datasetUri: v.datasetUri,
+              cpuRequest: v.cpuRequest,
+              cpuLimit: v.cpuLimit,
+              memoryRequest: v.memoryRequest,
+              memoryLimit: v.memoryLimit,
+              gpuValues,
+            });
+            setOpen(false);
+            form.resetFields();
+            message.success('TrainJob submitted');
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : 'Failed to submit TrainJob');
+          }
         }}
       >
         <Form
@@ -466,8 +498,9 @@ export function TrainJobsPage() {
       <LogViewer
         open={!!log}
         onClose={() => setLog(null)}
-        title={`Logs · ${log?.name ?? ''}`}
-        containers={['trainer', 'launcher']}
+        title={`Logs · ${log?.job.name ?? ''}`}
+        containers={log?.pod?.containers ?? ['trainer', 'launcher']}
+        podRef={log?.pod ? { namespace: log.pod.namespace, name: log.pod.name } : undefined}
       />
     </div>
   );

@@ -4,7 +4,7 @@
 // knaic-backend/internal/k8sres/projections.go. Add a new entry here when
 // you register a new Kind on the backend.
 
-import { request, apiBaseUrl, apiEnabled } from './client';
+import { request, apiEnabled, requestText, fetchWithAuth } from './client';
 
 export type Slug =
   | 'deployments'
@@ -34,12 +34,23 @@ export function getNamespaced<T>(slug: Slug, ns: string, name: string): Promise<
 }
 
 export async function fetchYaml(slug: Slug | ClusterSlug, ns: string | null, name: string): Promise<string> {
-  const path = ns
+  return requestText(ns
     ? `/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}/${encodeURIComponent(name)}/yaml`
-    : `/api/v1/cluster/${slug}/${encodeURIComponent(name)}/yaml`;
-  const res = await fetch(`${apiBaseUrl}${path}`, { credentials: 'include' });
-  if (!res.ok) throw new Error(`yaml ${slug}/${name}: HTTP ${res.status}`);
-  return res.text();
+    : `/api/v1/cluster/${slug}/${encodeURIComponent(name)}/yaml`);
+}
+
+export function createNamespaced<T>(slug: Slug, ns: string, obj: unknown): Promise<T> {
+  return request<T>(`/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}`, {
+    method: 'POST',
+    body: obj,
+  });
+}
+
+export function updateNamespaced<T>(slug: Slug, ns: string, name: string, obj: unknown): Promise<T> {
+  return request<T>(`/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    body: obj,
+  });
 }
 
 export function deleteNamespaced(slug: Slug, ns: string, name: string): Promise<void> {
@@ -51,6 +62,14 @@ export function deleteNamespaced(slug: Slug, ns: string, name: string): Promise<
 
 export function listCluster<T>(slug: ClusterSlug): Promise<T[]> {
   return request<T[]>(`/api/v1/cluster/${slug}`);
+}
+
+export function createCluster<T>(slug: ClusterSlug, obj: unknown): Promise<T> {
+  return request<T>(`/api/v1/cluster/${slug}`, { method: 'POST', body: obj });
+}
+
+export function deleteCluster(slug: ClusterSlug, name: string): Promise<void> {
+  return request<void>(`/api/v1/cluster/${slug}/${encodeURIComponent(name)}`, { method: 'DELETE' });
 }
 
 // ---- Pod log streaming --------------------------------------------------
@@ -80,13 +99,14 @@ export async function streamPodLogs(ns: string, name: string, opts: LogStreamOpt
   if (opts.follow) params.set('follow', 'true');
   if (opts.tailLines !== undefined) params.set('tailLines', String(opts.tailLines));
   if (opts.previous) params.set('previous', 'true');
-  const url = `${apiBaseUrl}/api/v1/namespaces/${encodeURIComponent(ns)}/pods/${encodeURIComponent(name)}/logs?${params}`;
   try {
-    const res = await fetch(url, {
-      headers: { Accept: 'text/event-stream' },
-      signal: opts.signal,
-      credentials: 'include',
-    });
+    const res = await fetchWithAuth(
+      `/api/v1/namespaces/${encodeURIComponent(ns)}/pods/${encodeURIComponent(name)}/logs?${params}`,
+      {
+        headers: { Accept: 'text/event-stream' },
+        signal: opts.signal,
+      },
+    );
     if (!res.ok || !res.body) {
       throw new Error(`logs HTTP ${res.status}`);
     }

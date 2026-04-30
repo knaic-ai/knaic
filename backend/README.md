@@ -73,6 +73,29 @@ OIDC issuer discovery and JWKS fetch skip TLS verification by default. Set
 `KNAIC_OIDC_INSECURE_SKIP_VERIFY=false` to require normal certificate
 validation.
 
+### Apiserver impersonation
+
+The namespace selector (`GET /api/v1/namespaces`) lists namespaces filtered by
+the caller's K8s RBAC. For non-admin callers, the backend impersonates the
+verified OIDC identity against the apiserver. Bind a ClusterRole like the
+following to the backend's ServiceAccount:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: knaic-impersonator
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups", "serviceaccounts"]
+    verbs: ["impersonate"]
+```
+
+Make sure your `KNAIC_OIDC_USERNAME_CLAIM` and `KNAIC_OIDC_USERNAME_PREFIX`
+match the apiserver flags (`--oidc-username-claim`, `--oidc-username-prefix`)
+so the impersonated subject matches the names in `RoleBinding.subjects[].name`.
+
+
 ### Configuration
 
 | Env var | Default | Notes |
@@ -82,7 +105,12 @@ validation.
 | `KUBECONFIG` | _(in-cluster)_ | path to kubeconfig |
 | `KNAIC_OIDC_ISSUER` | _(required unless disabled)_ | Dex / OIDC issuer URL |
 | `KNAIC_OIDC_CLIENT_ID` | `knaic` | OIDC client ID |
+| `KNAIC_OIDC_CLIENT_SECRET` | _(empty)_ | injected on token-exchange and refresh by the `/api/v1/auth/token` proxy; set when the upstream client is confidential. Empty keeps the public-PKCE flow. |
+| `KNAIC_OIDC_REDIRECT_URI` | _(empty → `${origin}/auth/callback`)_ | absolute redirect URI registered with the IdP. Set when the frontend is served behind a different external host than the browser's `window.location.origin`. Must exactly match the value registered in Dex. |
 | `KNAIC_OIDC_ADMIN_GROUP` | `knaic:platform-admins` | group claim that grants platform-admin |
+| `KNAIC_OIDC_SCOPES` | `openid profile email groups` | scopes requested by the frontend PKCE login |
+| `KNAIC_OIDC_USERNAME_CLAIM` | `email` | OIDC claim used as the apiserver username when impersonating non-admin callers (`sub`, `email`, or `name`). Match your apiserver's `--oidc-username-claim`. |
+| `KNAIC_OIDC_USERNAME_PREFIX` | _(empty)_ | optional prefix prepended to the impersonated username. Match your apiserver's `--oidc-username-prefix`. |
 | `KNAIC_OIDC_INSECURE_SKIP_VERIFY` | `true` | skip TLS verification for OIDC discovery and JWKS fetches |
 | `KNAIC_AUTH_DISABLED` | `false` | dev only — injects a fake admin |
 | `KNAIC_REGISTRY_ENDPOINT` | `registry.knaic.local` | mirrored image registry host |
@@ -97,6 +125,7 @@ validation.
 ```
 GET    /healthz                              -> 200 ok
 GET    /readyz                               -> 200 ready
+GET    /api/v1/auth/config                   -> public OIDC login config
 GET    /api/v1/whoami                        -> resolved User (auth req'd)
 
 GET    /api/v1/components                    -> list (with cluster reconcile)
@@ -179,3 +208,47 @@ Every release knaic creates is named `knaic-<component>` and labeled with
 `knaic.io/managed=true` + `knaic.io/component=<name>`. Detection treats any
 release of the same chart that lacks these markers as **Unmanaged (manual)**;
 matching OLM ClusterServiceVersions are reported as **Unmanaged (OLM)**.
+
+## Set KUBECONFIG
+
+Set the `KUBECONFIG` env var to the file path before starting `knaic-api`. It's already wired up in `internal/config/config.go:38` and consumed by `internal/k8s/client.go:50` (`loadConfig`):
+
+```bash
+KUBECONFIG=$HOME/.kube/dev-cluster.yaml ./bin/knaic-api
+```
+
+Resolution order (`internal/k8s/client.go:51-71`):
+1. **`KUBECONFIG` set** → use that file as the explicit path.
+2. **Empty + running inside a pod** → in-cluster config (`/var/run/secrets/kubernetes.io/serviceaccount/...`).
+3. **Empty + outside cluster** → default loading rules (`$HOME/.kube/config`, plus any colon-separated `KUBECONFIG` chain — k8s standard).
+
+It's already documented at `backend/README.md:82` (`KUBECONFIG | _(in-cluster)_ | path to kubeconfig`).
+
+For Helm:
+
+```yaml
+# values.yaml
+kubeconfig:
+  existingSecret: ""        # if set, mount instead of using in-cluster SA
+  secretKey: kubeconfig
+
+# templates/deployment.yaml — pick one
+{{- if .Values.kubeconfig.existingSecret }}
+volumeMounts:
+  - name: kubeconfig
+    mountPath: /etc/knaic
+    readOnly: true
+env:
+  - name: KUBECONFIG
+    value: /etc/knaic/kubeconfig
+volumes:
+  - name: kubeconfig
+    secret:
+      secretName: {{ .Values.kubeconfig.existingSecret }}
+      items:
+        - key: {{ .Values.kubeconfig.secretKey }}
+          path: kubeconfig
+{{- end }}
+```
+
+In-cluster (no kubeconfig, run with the pod's ServiceAccount) is the recommended deploy mode, since impersonation rights are then bound to that SA.

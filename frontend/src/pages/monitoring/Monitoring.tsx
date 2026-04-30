@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Select, Space, Radio, Tag } from 'antd';
 import {
   AreaChart,
@@ -14,8 +14,10 @@ import {
 import { PageHeader } from '@/components/PageHeader';
 import { buildSeries, type Resource, type Scope, type Kind } from '@/data/metrics';
 import { useApp } from '@/context/AppContext';
-import { useNodes } from '@/data/nodes';
-import { usePods } from '@/data/workloads';
+import { ensureNodesLoaded, useNodes } from '@/data/nodes';
+import { ensurePodsLoaded, usePods } from '@/data/workloads';
+import { apiEnabled } from '@/api/client';
+import { queryMonitoring } from '@/api/monitoring';
 
 const resourceOptions: { label: string; value: Resource }[] = [
   { label: 'CPU', value: 'cpu' },
@@ -25,6 +27,31 @@ const resourceOptions: { label: string; value: Resource }[] = [
   { label: 'Network', value: 'network' },
 ];
 
+const allKinds: Kind[] = ['usage', 'requests', 'limits'];
+type ChartData = Record<Resource, Array<Record<string, string | number>>>;
+
+function fallbackChartData(scope: Scope, target: string): ChartData {
+  const map: ChartData = {
+    cpu: [],
+    memory: [],
+    gpu: [],
+    disk: [],
+    network: [],
+  };
+  for (const r of resourceOptions) {
+    const usage = buildSeries(scope, target, r.value, 'usage');
+    const req = buildSeries(scope, target, r.value, 'requests');
+    const lim = buildSeries(scope, target, r.value, 'limits');
+    map[r.value] = usage.points.map((p, i) => ({
+      t: p.t,
+      usage: p.v,
+      requests: req.points[i]?.v ?? 0,
+      limits: lim.points[i]?.v ?? 0,
+    }));
+  }
+  return map;
+}
+
 export function Monitoring() {
   const { user, namespace, namespaces } = useApp();
   const pods = usePods();
@@ -33,6 +60,13 @@ export function Monitoring() {
   const [scope, setScope] = useState<Scope>('cluster');
   const [target, setTarget] = useState('prod-ai-01');
   const [kinds, setKinds] = useState<Kind[]>(['usage', 'requests', 'limits']);
+  const [chartData, setChartData] = useState<ChartData>(() => fallbackChartData('cluster', 'prod-ai-01'));
+  const [source, setSource] = useState<'api' | 'fallback'>(apiEnabled ? 'api' : 'fallback');
+
+  useEffect(() => {
+    ensureNodesLoaded();
+    ensurePodsLoaded(namespace);
+  }, [namespace]);
 
   const targets = useMemo(() => {
     switch (scope) {
@@ -49,26 +83,37 @@ export function Monitoring() {
     }
   }, [scope, namespaces, namespace, pods, nodes]);
 
-  const chartData = useMemo(() => {
-    const map: Record<Resource, Array<Record<string, string | number>>> = {
-      cpu: [],
-      memory: [],
-      gpu: [],
-      disk: [],
-      network: [],
-    };
-    for (const r of resourceOptions) {
-      const usage = buildSeries(scope, target, r.value, 'usage');
-      const req = buildSeries(scope, target, r.value, 'requests');
-      const lim = buildSeries(scope, target, r.value, 'limits');
-      map[r.value] = usage.points.map((p, i) => ({
+  useEffect(() => {
+    let cancelled = false;
+    if (!apiEnabled || !target) {
+      setSource('fallback');
+      setChartData(fallbackChartData(scope, target));
+      return;
+    }
+    Promise.all(resourceOptions.map(async r => {
+      const [usage, requests, limits] = await Promise.all(
+        allKinds.map(kind => queryMonitoring({ scope, target, resource: r.value, kind })),
+      );
+      return [r.value, usage.points.map((p, i) => ({
         t: p.t,
         usage: p.v,
-        requests: req.points[i].v,
-        limits: lim.points[i].v,
-      }));
-    }
-    return map;
+        requests: requests.points[i]?.v ?? 0,
+        limits: limits.points[i]?.v ?? 0,
+      }))] as const;
+    }))
+      .then(entries => {
+        if (cancelled) return;
+        setChartData({ ...fallbackChartData(scope, target), ...Object.fromEntries(entries) });
+        setSource('api');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setChartData(fallbackChartData(scope, target));
+        setSource('fallback');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [scope, target]);
 
   return (
@@ -117,7 +162,7 @@ export function Monitoring() {
             style={{ minWidth: 280 }}
             maxTagCount="responsive"
           />
-          <Tag color="blue">Step 5m · last 3h</Tag>
+          <Tag color={source === 'api' ? 'green' : 'blue'}>{source === 'api' ? 'Prometheus API' : 'Fallback series'}</Tag>
         </Space>
       </Card>
 

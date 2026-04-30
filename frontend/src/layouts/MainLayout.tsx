@@ -20,8 +20,10 @@ import {
   BulbFilled,
   DesktopOutlined,
 } from '@ant-design/icons';
-import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useApp, type NamespaceRole } from '@/context/AppContext';
+import { apiEnabled } from '@/api/client';
+import { useAuth } from '@/auth/AuthContext';
 
 const { Header, Sider, Content } = Layout;
 
@@ -35,8 +37,8 @@ const roleColor: Record<NamespaceRole, string> = {
 
 export function MainLayout() {
   const { user, setUser, namespace, setNamespace, namespaces, themeMode, setThemeMode, isDark, roleIn } = useApp();
+  const auth = useAuth();
   const loc = useLocation();
-  const nav = useNavigate();
 
   const myNamespaces = useMemo(
     () => (user.isPlatformAdmin ? namespaces : namespaces.filter(n => roleIn(n))),
@@ -172,6 +174,7 @@ export function MainLayout() {
           <span>Platform admin</span>
           <Segmented
             size="small"
+            disabled={apiEnabled}
             value={user.isPlatformAdmin ? 'yes' : 'no'}
             onChange={v => setUser({ ...user, isPlatformAdmin: v === 'yes' })}
             options={[
@@ -183,7 +186,7 @@ export function MainLayout() {
       ),
     },
     { type: 'divider' },
-    { key: 'logout', icon: <LogoutOutlined />, label: 'Sign out', onClick: () => nav('/') },
+    { key: 'logout', icon: <LogoutOutlined />, label: 'Sign out', onClick: auth.logout },
   ];
 
   return (
@@ -250,9 +253,9 @@ export function MainLayout() {
             <Dropdown menu={{ items: userMenu }} placement="bottomRight">
               <Space style={{ cursor: 'pointer' }}>
                 <Avatar size="small" style={{ background: '#2468f2' }}>
-                  {user.name[0].toUpperCase()}
+                  {(user.name[0] ?? '?').toUpperCase()}
                 </Avatar>
-                <span>{user.name}</span>
+                <span>{user.name || 'user'}</span>
                 {user.isPlatformAdmin && <CrownOutlined style={{ color: '#f8b418' }} />}
               </Space>
             </Dropdown>
