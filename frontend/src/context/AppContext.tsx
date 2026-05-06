@@ -5,6 +5,8 @@ import {
   useState,
   useEffect,
   type ReactNode,
+  type Dispatch,
+  type SetStateAction,
 } from 'react';
 import { apiEnabled } from '@/api/client';
 import * as adminApi from '@/api/admin';
@@ -25,7 +27,7 @@ export interface AppState {
   user: User;
   setUser: (u: User) => void;
   namespace: string;
-  setNamespace: (ns: string) => void;
+  setNamespace: Dispatch<SetStateAction<string>>;
   namespaces: string[];
   addNamespace: (ns: string) => void;
   removeNamespace: (ns: string) => void;
@@ -57,7 +59,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ...(apiEnabled ? [] : ['team-ml', 'team-vision', 'team-llm']),
     'default',
   ]);
-  const [namespace, setNamespace] = useState<string>(apiEnabled ? 'default' : 'team-ml');
+  const [namespace, setNamespaceRaw] = useState<string>(() => {
+    const stored = typeof window !== 'undefined' ? localStorage.getItem('knaic:namespace') : null;
+    if (stored) return stored;
+    return apiEnabled ? 'default' : 'team-ml';
+  });
+  const setNamespace: Dispatch<SetStateAction<string>> = updater => {
+    setNamespaceRaw(prev => {
+      const next = typeof updater === 'function' ? (updater as (p: string) => string)(prev) : updater;
+      try {
+        localStorage.setItem('knaic:namespace', next);
+      } catch {
+        /* quota / private-mode — ignore */
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!apiEnabled || auth.status !== 'authenticated' || !auth.user) return;

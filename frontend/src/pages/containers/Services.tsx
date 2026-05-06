@@ -47,13 +47,13 @@ export function Services() {
           { title: 'ClusterIP', dataIndex: 'clusterIP', render: v => <span className="mono">{v}</span> },
           {
             title: 'Ports',
-            render: (_, r) => r.ports.map(p => `${p.port}→${p.targetPort}/${p.protocol}`).join(', '),
+            render: (_, r) => (r.ports ?? []).map(p => `${p.port}→${p.targetPort}/${p.protocol}`).join(', '),
           },
           {
             title: 'Selector',
             render: (_, r) => (
               <Space wrap size={4}>
-                {Object.entries(r.selector).map(([k, v]) => (
+                {Object.entries(r.selector ?? {}).map(([k, v]) => (
                   <Tag key={k}>{k}={v}</Tag>
                 ))}
               </Space>

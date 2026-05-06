@@ -32,8 +32,8 @@ export function reconcileComponentApi(name: string): Promise<ComponentItem> {
   return request<ComponentItem>(`/api/v1/components/${name}/reconcile`, { method: 'POST' });
 }
 
-export function adoptComponentApi(name: string): Promise<ComponentItem> {
-  return request<ComponentItem>(`/api/v1/components/${name}/adopt`, { method: 'POST' });
+export function fetchComponentStatus(name: string, signal?: AbortSignal): Promise<ComponentItem> {
+  return request<ComponentItem>(`/api/v1/components/status?name=${encodeURIComponent(name)}`, { signal });
 }
 
 export interface ImportRequest {

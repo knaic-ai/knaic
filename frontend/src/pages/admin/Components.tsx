@@ -11,6 +11,7 @@ import {
   Input,
   Form,
   Progress,
+  Spin,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
@@ -27,7 +28,6 @@ import {
   installComponent,
   uninstallComponent,
   reconcileComponent,
-  adoptComponent,
   updateComponent,
   addImportedComponent,
   removeComponent,
@@ -36,6 +36,7 @@ import {
   ensureInitialLoad,
   ensureRegistryLoaded,
   loadFromApi,
+  useComponentStatusLoading,
   type ComponentItem,
 } from '@/data/components';
 import { apiEnabled } from '@/api/client';
@@ -46,6 +47,7 @@ export function ComponentsPage() {
   const { user } = useApp();
   const { message, modal } = App.useApp();
   const components = useComponents();
+  const statusLoading = useComponentStatusLoading();
   const registry = useRegistry();
   const [filter, setFilter] = useState('');
   const [detail, setDetail] = useState<ComponentItem | null>(null);
@@ -80,7 +82,9 @@ export function ComponentsPage() {
           <Space>
             <a onClick={() => setDetail(r)} style={{ fontWeight: 600 }}>{r.displayName}</a>
             {!r.builtin && <Tag color="purple">imported</Tag>}
-            {r.status === 'Unmanaged' && r.managedBy && <Tag color="magenta">via {r.managedBy}</Tag>}
+            {r.status === 'Installed' && r.managedBy && r.managedBy !== 'knaic' && (
+              <Tag color="magenta">via {r.managedBy}</Tag>
+            )}
           </Space>
           <span className="knaic-sub mono">{r.name}</span>
         </Space>
@@ -96,12 +100,21 @@ export function ComponentsPage() {
           onChange={v => updateComponent(r.name, { selectedVersion: v })}
           options={r.versions.map(v => ({ label: v, value: v }))}
           style={{ width: 140 }}
-          disabled={r.status === 'Installed' || r.status === 'Installing' || r.status === 'Unmanaged'}
+          disabled={r.status === 'Installed' || r.status === 'Installing'}
         />
       ),
     },
     { title: 'Namespace', dataIndex: 'namespace' },
-    { title: 'Status', dataIndex: 'status', render: v => <StatusTag value={v} /> },
+    {
+      title: 'Status',
+      dataIndex: 'status',
+      render: (v, r) => (
+        <Space size={6}>
+          <StatusTag value={v} />
+          {statusLoading.has(r.name) && <Spin size="small" />}
+        </Space>
+      ),
+    },
     {
       title: 'Images synced',
       dataIndex: 'imageSync',
@@ -111,32 +124,13 @@ export function ComponentsPage() {
       title: 'Actions',
       width: 280,
       render: (_, r) => {
-        if (r.status === 'Unmanaged') {
-          return (
-            <Space>
-              <Button
-                size="small"
-                onClick={() =>
-                  modal.confirm({
-                    title: `Take over ${r.displayName}?`,
-                    content: 'knaic will become the owner. The previous install chart may conflict.',
-                    onOk: async () => {
-                      try {
-                        await adoptComponent(r.name);
-                        message.success('Now managed by knaic');
-                      } catch (e) {
-                        message.error((e as Error).message);
-                      }
-                    },
-                  })
-                }
-              >
-                Adopt
-              </Button>
-            </Space>
-          );
-        }
         if (r.status === 'Installed') {
+          // Components installed by anything other than knaic stay visible
+          // but offer no actions — knaic refuses to mutate something it
+          // doesn't own.
+          if (r.managedBy && r.managedBy !== 'knaic') {
+            return <span className="knaic-sub">unmanaged · {r.managedBy}</span>;
+          }
           return (
             <Space>
               <Button

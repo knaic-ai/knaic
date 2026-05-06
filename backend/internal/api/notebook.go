@@ -9,11 +9,12 @@ import (
 )
 
 type notebookAPI struct {
-	svc *notebook.Service
+	svc    *notebook.Service
+	source k8sClientSource
 }
 
-func newNotebookAPI(svc *notebook.Service) *notebookAPI {
-	return &notebookAPI{svc: svc}
+func newNotebookAPI(svc *notebook.Service, source k8sClientSource) *notebookAPI {
+	return &notebookAPI{svc: svc, source: source}
 }
 
 func (a *notebookAPI) routes(r chi.Router) {
@@ -28,7 +29,12 @@ func (a *notebookAPI) create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	obj, err := a.svc.Create(r.Context(), chi.URLParam(r, "namespace"), req)
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	obj, err := svc.Create(r.Context(), chi.URLParam(r, "namespace"), req)
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -37,7 +43,12 @@ func (a *notebookAPI) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *notebookAPI) stop(w http.ResponseWriter, r *http.Request) {
-	obj, err := a.svc.Stop(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	obj, err := svc.Stop(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -46,10 +57,26 @@ func (a *notebookAPI) stop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *notebookAPI) start(w http.ResponseWriter, r *http.Request) {
-	obj, err := a.svc.Start(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	obj, err := svc.Start(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, obj.Object)
+}
+
+func (a *notebookAPI) service(r *http.Request) (*notebook.Service, error) {
+	if a.source.authDisabled {
+		return a.svc, nil
+	}
+	clients, err := a.source.clientsForRequest(r)
+	if err != nil {
+		return nil, err
+	}
+	return notebook.New(clients.Dynamic, clients.Typed), nil
 }

@@ -245,6 +245,9 @@ func projectService(o *unstructured.Unstructured) Projection {
 		}
 		ports = append(ports, entry)
 	}
+	if selector == nil {
+		selector = map[string]string{}
+	}
 	p["type"] = typ
 	p["clusterIP"] = clusterIP
 	p["selector"] = selector

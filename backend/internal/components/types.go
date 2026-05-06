@@ -24,6 +24,7 @@ type ManagedBy string
 
 const (
 	ManagedByKnaic  ManagedBy = "knaic"
+	ManagedByACP    ManagedBy = "ACP"
 	ManagedByOLM    ManagedBy = "OLM"
 	ManagedByManual ManagedBy = "manual"
 )
@@ -55,6 +56,12 @@ type Component struct {
 	Notes           string    `json:"notes,omitempty"`
 	ManagedBy       ManagedBy `json:"managedBy,omitempty"`
 	Builtin         bool      `json:"builtin"`
+
+	// Chart is the URL of the Helm chart to install. Supports oci://, https://
+	// (direct .tgz), or a Helm-repo + chart pair separated by "@" (e.g.
+	// "https://charts.example.com@kserve"). When empty, the install action
+	// falls back to the embedded chart bundled with knaic (if any).
+	Chart string `json:"chart,omitempty"`
 
 	// Embedded indicates whether the chart for this component is bundled
 	// inside the knaic binary. Imported charts are not.

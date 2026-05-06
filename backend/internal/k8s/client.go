@@ -19,11 +19,33 @@ type Clients struct {
 	RESTGetter genericclioptions.RESTClientGetter
 }
 
+type UserClients struct {
+	Typed     kubernetes.Interface
+	Dynamic   dynamic.Interface
+	Discovery discovery.DiscoveryInterface
+}
+
+func (c *Clients) Base() (*UserClients, error) {
+	if c == nil {
+		return nil, fmt.Errorf("k8s clients not initialized")
+	}
+	if c.Typed != nil && c.Dynamic != nil && c.Discovery != nil {
+		return &UserClients{Typed: c.Typed, Dynamic: c.Dynamic, Discovery: c.Discovery}, nil
+	}
+	if c.Typed != nil && c.Dynamic != nil {
+		return &UserClients{Typed: c.Typed, Dynamic: c.Dynamic, Discovery: c.Discovery}, nil
+	}
+	if c.Config == nil {
+		return nil, fmt.Errorf("k8s clients not initialized")
+	}
+	return newUserClientsForConfig(c.Config)
+}
+
 // Impersonate returns a typed client that talks to the apiserver as the named
 // user/groups via the standard impersonation headers. Requires the backend's
 // service account to hold a ClusterRole granting `impersonate` on
 // users/groups/serviceaccounts in `authentication.k8s.io` (or be cluster-admin).
-func (c *Clients) Impersonate(userName string, groups []string) (kubernetes.Interface, error) {
+func (c *Clients) Impersonate(userName string, groups []string) (*UserClients, error) {
 	if c == nil || c.Config == nil {
 		return nil, fmt.Errorf("k8s clients not initialized")
 	}
@@ -32,7 +54,23 @@ func (c *Clients) Impersonate(userName string, groups []string) (kubernetes.Inte
 		UserName: userName,
 		Groups:   groups,
 	}
-	return kubernetes.NewForConfig(cfg)
+	return newUserClientsForConfig(cfg)
+}
+
+func newUserClientsForConfig(cfg *rest.Config) (*UserClients, error) {
+	typed, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("typed client: %w", err)
+	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic client: %w", err)
+	}
+	disc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("discovery client: %w", err)
+	}
+	return &UserClients{Typed: typed, Dynamic: dyn, Discovery: disc}, nil
 }
 
 // New returns a Clients bundle. If kubeconfigPath is empty, in-cluster config

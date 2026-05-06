@@ -40,8 +40,11 @@ export function MainLayout() {
   const auth = useAuth();
   const loc = useLocation();
 
+  // In API mode the backend has already filtered the namespaces list to those
+  // the caller can see (via apiserver impersonation), so the local membership
+  // filter is only relevant in prototype mode.
   const myNamespaces = useMemo(
-    () => (user.isPlatformAdmin ? namespaces : namespaces.filter(n => roleIn(n))),
+    () => (apiEnabled || user.isPlatformAdmin ? namespaces : namespaces.filter(n => roleIn(n))),
     [namespaces, user, roleIn],
   );
 

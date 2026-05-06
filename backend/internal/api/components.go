@@ -20,12 +20,12 @@ func (a *componentsAPI) routes(r chi.Router) {
 	r.Get("/", a.list)
 	r.Post("/", a.importChart)
 	r.Get("/{name}", a.get)
+	r.Get("/{name}/status", a.status)
 	r.Patch("/{name}", a.patch)
 	r.Delete("/{name}", a.remove)
 	r.Post("/{name}/install", a.install)
 	r.Post("/{name}/uninstall", a.uninstall)
 	r.Post("/{name}/reconcile", a.reconcile)
-	r.Post("/{name}/adopt", a.adopt)
 }
 
 func (a *componentsAPI) list(w http.ResponseWriter, r *http.Request) {
@@ -100,10 +100,15 @@ func (a *componentsAPI) reconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c)
 }
 
-func (a *componentsAPI) adopt(w http.ResponseWriter, r *http.Request) {
-	c, err := a.svc.Adopt(r.Context(), chi.URLParam(r, "name"))
+func (a *componentsAPI) status(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "name query param is required"})
+		return
+	}
+	c, err := a.svc.Status(r.Context(), name)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, c)

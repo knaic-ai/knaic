@@ -67,7 +67,11 @@ func main() {
 		log.Warn("k8s client init failed; running without cluster access", "err", err)
 	}
 
-	store := components.NewStore(cfg.SystemNamespace)
+	store, err := components.NewStore(cfg.SystemNamespace, cfg.ComponentCatalog)
+	if err != nil {
+		log.Error("component catalog load", "err", err)
+		os.Exit(1)
+	}
 
 	var helmClient components.HelmClient
 	var detector *components.Detector
@@ -117,31 +121,36 @@ func main() {
 		modelStore = models.NewMemoryStore()
 		log.Warn("model hub: in-memory backend (data resets on restart). Set KNAIC_DB_URL for persistence.")
 	}
-	if err := models.Seed(ctx, modelStore); err != nil {
+	if err := models.Seed(ctx, modelStore, cfg.PublicModelsSeed); err != nil {
 		log.Warn("seed builtin models", "err", err)
 	}
-	modelSvc := models.NewService(modelStore)
+	var modelAuthorizer models.NamespaceAuthorizer
+	if clients != nil {
+		modelAuthorizer = k8s.NewAuthorizer(clients, cfg.OIDCUsernameClaim, cfg.OIDCUsernamePrefix, cfg.AuthDisabled)
+	}
+	modelSvc := models.NewServiceWithAuthorizer(modelStore, modelAuthorizer)
 	monitoringSvc := monitoring.NewService(cfg.PrometheusURL, nil)
 	playgroundSvc := playground.NewService()
 
 	router := api.NewRouter(api.Deps{
-		Verifier:    verifier,
-		AuthProxy:   authProxy,
-		AuthConfig:  api.AuthConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, Scopes: cfg.OIDCScopes, RedirectURI: cfg.OIDCRedirectURI},
-		K8s:         clients,
-		UserClaim:   cfg.OIDCUsernameClaim,
-		UserPrefix:  cfg.OIDCUsernamePrefix,
-		Components:  compSvc,
-		Registry:    regStore,
-		K8sRes:      resSvc,
-		Admin:       adminSvc,
-		Inference:   infSvc,
-		Notebook:    nbSvc,
-		Models:      modelSvc,
-		Training:    trainSvc,
-		Monitoring:  monitoringSvc,
-		Playground:  playgroundSvc,
-		CORSOrigins: cfg.CORSOrigins,
+		Verifier:     verifier,
+		AuthProxy:    authProxy,
+		AuthConfig:   api.AuthConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, Scopes: cfg.OIDCScopes, RedirectURI: cfg.OIDCRedirectURI},
+		AuthDisabled: cfg.AuthDisabled,
+		K8s:          clients,
+		UserClaim:    cfg.OIDCUsernameClaim,
+		UserPrefix:   cfg.OIDCUsernamePrefix,
+		Components:   compSvc,
+		Registry:     regStore,
+		K8sRes:       resSvc,
+		Admin:        adminSvc,
+		Inference:    infSvc,
+		Notebook:     nbSvc,
+		Models:       modelSvc,
+		Training:     trainSvc,
+		Monitoring:   monitoringSvc,
+		Playground:   playgroundSvc,
+		CORSOrigins:  cfg.CORSOrigins,
 	})
 
 	srv := &http.Server{

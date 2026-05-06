@@ -15,11 +15,12 @@ import (
 )
 
 type k8sresAPI struct {
-	svc *k8sres.Service
+	svc    *k8sres.Service
+	source k8sClientSource
 }
 
-func newK8sresAPI(svc *k8sres.Service) *k8sresAPI {
-	return &k8sresAPI{svc: svc}
+func newK8sresAPI(svc *k8sres.Service, source k8sClientSource) *k8sresAPI {
+	return &k8sresAPI{svc: svc, source: source}
 }
 
 func (a *k8sresAPI) routes(r chi.Router) {
@@ -81,7 +82,12 @@ func (a *k8sresAPI) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := a.svc.List(r.Context(), k, chi.URLParam(r, "namespace"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	items, err := svc.List(r.Context(), k, chi.URLParam(r, "namespace"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -94,7 +100,12 @@ func (a *k8sresAPI) get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := a.svc.Get(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	item, err := svc.Get(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -112,7 +123,12 @@ func (a *k8sresAPI) create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	item, err := a.svc.Create(r.Context(), k, chi.URLParam(r, "namespace"), obj)
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	item, err := svc.Create(r.Context(), k, chi.URLParam(r, "namespace"), obj)
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -130,7 +146,12 @@ func (a *k8sresAPI) update(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	item, err := a.svc.Update(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), obj)
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	item, err := svc.Update(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), obj)
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -143,7 +164,12 @@ func (a *k8sresAPI) yaml(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out, err := a.svc.YAML(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	out, err := svc.YAML(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -158,7 +184,12 @@ func (a *k8sresAPI) delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.svc.Delete(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name")); err != nil {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	if err := svc.Delete(r.Context(), k, chi.URLParam(r, "namespace"), chi.URLParam(r, "name")); err != nil {
 		writeK8sError(w, err)
 		return
 	}
@@ -182,7 +213,12 @@ func (a *k8sresAPI) logs(w http.ResponseWriter, r *http.Request) {
 	if v, err := strconv.ParseInt(q.Get("sinceSeconds"), 10, 64); err == nil && v > 0 {
 		opts.SinceSeconds = v
 	}
-	err := a.svc.StreamPodLogs(r.Context(), w, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), opts)
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	err = svc.StreamPodLogs(r.Context(), w, chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), opts)
 	if err != nil && !errors.Is(err, http.ErrAbortHandler) {
 		// Headers may already be flushed — log only.
 		_ = err
@@ -196,7 +232,12 @@ func (a *k8sresAPI) listCluster(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := a.svc.List(r.Context(), k, "")
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	items, err := svc.List(r.Context(), k, "")
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -209,7 +250,12 @@ func (a *k8sresAPI) getCluster(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := a.svc.Get(r.Context(), k, "", chi.URLParam(r, "name"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	item, err := svc.Get(r.Context(), k, "", chi.URLParam(r, "name"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -227,7 +273,12 @@ func (a *k8sresAPI) createCluster(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	item, err := a.svc.Create(r.Context(), k, "", obj)
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	item, err := svc.Create(r.Context(), k, "", obj)
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -245,7 +296,12 @@ func (a *k8sresAPI) updateCluster(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
-	item, err := a.svc.Update(r.Context(), k, "", chi.URLParam(r, "name"), obj)
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	item, err := svc.Update(r.Context(), k, "", chi.URLParam(r, "name"), obj)
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -258,7 +314,12 @@ func (a *k8sresAPI) yamlCluster(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out, err := a.svc.YAML(r.Context(), k, "", chi.URLParam(r, "name"))
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	out, err := svc.YAML(r.Context(), k, "", chi.URLParam(r, "name"))
 	if err != nil {
 		writeK8sError(w, err)
 		return
@@ -272,11 +333,27 @@ func (a *k8sresAPI) deleteCluster(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.svc.Delete(r.Context(), k, "", chi.URLParam(r, "name")); err != nil {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	if err := svc.Delete(r.Context(), k, "", chi.URLParam(r, "name")); err != nil {
 		writeK8sError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *k8sresAPI) service(r *http.Request) (*k8sres.Service, error) {
+	if a.source.authDisabled {
+		return a.svc, nil
+	}
+	clients, err := a.source.clientsForRequest(r)
+	if err != nil {
+		return nil, err
+	}
+	return k8sres.NewService(clients.Dynamic, clients.Typed), nil
 }
 
 func decodeK8sObject(r *http.Request) (map[string]any, error) {

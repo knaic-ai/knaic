@@ -16,10 +16,19 @@ import (
 var ErrForbidden = errors.New("forbidden")
 
 type Service struct {
-	store Store
+	store      Store
+	authorizer NamespaceAuthorizer
 }
 
 func NewService(s Store) *Service { return &Service{store: s} }
+
+type NamespaceAuthorizer interface {
+	CanWritePrivateModel(ctx context.Context, u *auth.User, namespace string) (bool, error)
+}
+
+func NewServiceWithAuthorizer(s Store, authorizer NamespaceAuthorizer) *Service {
+	return &Service{store: s, authorizer: authorizer}
+}
 
 func (s *Service) List(ctx context.Context, scope Scope, namespace string) ([]Model, error) {
 	if scope == ScopePrivate && namespace == "" {
@@ -40,7 +49,7 @@ func (s *Service) Create(ctx context.Context, u *auth.User, req CreateRequest) (
 	if err != nil {
 		return Model{}, err
 	}
-	if err := s.gateWrite(u, req.Scope, req.Namespace); err != nil {
+	if err := s.gateWrite(ctx, u, req.Scope, req.Namespace); err != nil {
 		return Model{}, err
 	}
 	owner := req.Owner
@@ -74,7 +83,7 @@ func (s *Service) Import(ctx context.Context, u *auth.User, req ImportRequest) (
 	if err != nil {
 		return Model{}, err
 	}
-	if err := s.gateWrite(u, req.Scope, req.Namespace); err != nil {
+	if err := s.gateWrite(ctx, u, req.Scope, req.Namespace); err != nil {
 		return Model{}, err
 	}
 	scheme, _ := ParseScheme(uri)
@@ -109,7 +118,7 @@ func (s *Service) Upload(ctx context.Context, u *auth.User, req UploadRequest) (
 	if err != nil {
 		return Model{}, err
 	}
-	if err := s.gateWrite(u, req.Scope, req.Namespace); err != nil {
+	if err := s.gateWrite(ctx, u, req.Scope, req.Namespace); err != nil {
 		return Model{}, err
 	}
 	owner := ""
@@ -154,7 +163,7 @@ func (s *Service) Patch(ctx context.Context, u *auth.User, id string, req PatchR
 		mutateScope = true
 	}
 	if mutateScope {
-		if err := s.gateWrite(u, current.Scope, current.Namespace); err != nil {
+		if err := s.gateWrite(ctx, u, current.Scope, current.Namespace); err != nil {
 			return Model{}, err
 		}
 	}
@@ -177,7 +186,7 @@ func (s *Service) Delete(ctx context.Context, u *auth.User, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.gateWrite(u, current.Scope, current.Namespace); err != nil {
+	if err := s.gateWrite(ctx, u, current.Scope, current.Namespace); err != nil {
 		return err
 	}
 	return s.store.Delete(ctx, id)
@@ -186,7 +195,7 @@ func (s *Service) Delete(ctx context.Context, u *auth.User, id string) error {
 // gateWrite enforces the scope/namespace authorisation rules:
 //   - public scope writes require platform-admin
 //   - private scope writes require platform-admin or namespace membership
-func (s *Service) gateWrite(u *auth.User, scope Scope, namespace string) error {
+func (s *Service) gateWrite(ctx context.Context, u *auth.User, scope Scope, namespace string) error {
 	if u == nil {
 		return ErrForbidden
 	}
@@ -200,10 +209,16 @@ func (s *Service) gateWrite(u *auth.User, scope Scope, namespace string) error {
 		if namespace == "" {
 			return errors.New("namespace required for private scope")
 		}
-		// The OIDC verifier may not provide per-namespace membership
-		// claims; for now we trust any authenticated user for private
-		// writes scoped to a namespace they reference. The Users / RBAC
-		// slice will tighten this via SubjectAccessReview.
+		if s.authorizer == nil {
+			return ErrForbidden
+		}
+		allowed, err := s.authorizer.CanWritePrivateModel(ctx, u, namespace)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown scope %q", scope)

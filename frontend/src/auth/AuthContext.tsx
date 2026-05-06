@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Alert, Button, Card, Result, Spin } from 'antd';
 import { LoginOutlined, ReloadOutlined } from '@ant-design/icons';
 import { ApiError, apiEnabled, setBearerToken, setUnauthorizedHandler } from '@/api/client';
@@ -35,6 +36,7 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [mode, setMode] = useState<AuthMode>(apiEnabled ? 'oidc' : 'prototype');
   const [user, setUser] = useState<WhoamiUser | null>(null);
@@ -146,7 +148,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setMode('oidc');
     setStatus('authenticated');
     setError(null);
-    window.history.replaceState(null, '', returnTo);
+    // React Router won't notice a bare history.replaceState, so the user gets
+    // stuck on /auth/callback. navigate() drives a real route transition.
+    navigate(returnTo || '/', { replace: true });
   }
 
   async function loadAuthConfig(): Promise<PublicAuthConfig> {

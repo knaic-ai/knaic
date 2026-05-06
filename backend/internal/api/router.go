@@ -23,23 +23,24 @@ import (
 )
 
 type Deps struct {
-	Verifier      *auth.Verifier
-	AuthProxy     *auth.Proxy
-	AuthConfig    AuthConfig
-	K8s           *k8s.Clients
-	UserClaim     string // OIDC claim used as the impersonated apiserver username
-	UserPrefix    string // optional prefix prepended to the impersonated username
-	Components    *components.Service
-	Registry      *registry.Store
-	K8sRes        *k8sres.Service
-	Admin         *admin.Service
-	Inference     *inference.Service
-	Notebook      *notebook.Service
-	Models        *models.Service
-	Training      *training.Service
-	Monitoring    *monitoring.Service
-	Playground    *playground.Service
-	CORSOrigins   []string
+	Verifier     *auth.Verifier
+	AuthProxy    *auth.Proxy
+	AuthConfig   AuthConfig
+	AuthDisabled bool
+	K8s          *k8s.Clients
+	UserClaim    string // OIDC claim used as the impersonated apiserver username
+	UserPrefix   string // optional prefix prepended to the impersonated username
+	Components   *components.Service
+	Registry     *registry.Store
+	K8sRes       *k8sres.Service
+	Admin        *admin.Service
+	Inference    *inference.Service
+	Notebook     *notebook.Service
+	Models       *models.Service
+	Training     *training.Service
+	Monitoring   *monitoring.Service
+	Playground   *playground.Service
+	CORSOrigins  []string
 }
 
 type AuthConfig struct {
@@ -100,6 +101,9 @@ func NewRouter(d Deps) http.Handler {
 				// require platform-admin.
 				cmp := newComponentsAPI(d.Components)
 				r.Get("/", cmp.list)
+				// /status takes ?name=foo (query string) so the catalog can be
+				// extended with names that don't fit nicely in a path segment.
+				r.Get("/status", cmp.status)
 				r.Get("/{name}", cmp.get)
 				r.Group(func(r chi.Router) {
 					r.Use(auth.RequirePlatformAdmin)
@@ -109,7 +113,6 @@ func NewRouter(d Deps) http.Handler {
 					r.Post("/{name}/install", cmp.install)
 					r.Post("/{name}/uninstall", cmp.uninstall)
 					r.Post("/{name}/reconcile", cmp.reconcile)
-					r.Post("/{name}/adopt", cmp.adopt)
 				})
 			})
 
@@ -124,7 +127,7 @@ func NewRouter(d Deps) http.Handler {
 			})
 
 			if d.K8sRes != nil {
-				newK8sresAPI(d.K8sRes).routes(r)
+				newK8sresAPI(d.K8sRes, newK8sClientSource(d)).routes(r)
 			}
 			if d.Admin != nil {
 				// Lightweight name+status list, used by the namespace selector.
@@ -142,7 +145,7 @@ func NewRouter(d Deps) http.Handler {
 			}
 			if d.Inference != nil {
 				r.Route("/namespaces/{namespace}/inference", func(r chi.Router) {
-					newInferenceAPI(d.Inference).routes(r)
+					newInferenceAPI(d.Inference, newK8sClientSource(d)).routes(r)
 				})
 			}
 			if d.Notebook != nil {
@@ -150,7 +153,7 @@ func NewRouter(d Deps) http.Handler {
 				// generic /namespaces/{ns}/notebooks list GET handled by the
 				// k8sres dispatcher.
 				r.Route("/namespaces/{namespace}/notebook", func(r chi.Router) {
-					newNotebookAPI(d.Notebook).routes(r)
+					newNotebookAPI(d.Notebook, newK8sClientSource(d)).routes(r)
 				})
 			}
 			if d.Models != nil {
@@ -160,7 +163,7 @@ func NewRouter(d Deps) http.Handler {
 			}
 			if d.Training != nil {
 				r.Route("/namespaces/{namespace}/training", func(r chi.Router) {
-					newTrainingAPI(d.Training).routes(r)
+					newTrainingAPI(d.Training, newK8sClientSource(d)).routes(r)
 				})
 			}
 			if d.Monitoring != nil {

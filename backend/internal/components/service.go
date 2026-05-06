@@ -19,12 +19,20 @@ func NewService(store *Store, helm HelmClient, detector *Detector, log *slog.Log
 	return &Service{store: store, helm: helm, detector: detector, log: log}
 }
 
+// List returns the catalog snapshot WITHOUT running cluster detection. The
+// status/managedBy/namespace fields reflect the last detection result (or
+// NotInstalled on a cold store). The frontend follows up with parallel
+// /components/{name}/status calls so the heavy cluster scan happens lazily
+// and doesn't block the initial page paint.
 func (s *Service) List(ctx context.Context) ([]Component, error) {
-	if err := s.detector.Reconcile(ctx, s.store); err != nil {
-		// Reconcile failure shouldn't blank the page — log and serve cached.
-		s.log.Warn("detector reconcile failed", "err", err)
-	}
 	return s.store.List(), nil
+}
+
+// Status runs live detection for one component and returns the updated entry.
+// Internally uses a 5-second snapshot cache shared across goroutines so a
+// burst of per-component requests only triggers one Helm/CSV listing.
+func (s *Service) Status(ctx context.Context, name string) (Component, error) {
+	return s.detector.DetectOne(ctx, s.store, name)
 }
 
 func (s *Service) Get(ctx context.Context, name string) (Component, error) {
@@ -51,9 +59,6 @@ func (s *Service) Install(ctx context.Context, name string) (Component, error) {
 	if c.Status == StatusInstalled {
 		return c, errors.New("already installed")
 	}
-	if c.Status == StatusUnmanaged {
-		return c, errors.New("component is Unmanaged; adopt it first")
-	}
 	if !c.Embedded {
 		return c, fmt.Errorf("component %q has no embedded chart; provide a chart archive on import", name)
 	}
@@ -69,8 +74,10 @@ func (s *Service) Install(ctx context.Context, name string) (Component, error) {
 	}
 	s.log.Info("component installed",
 		"name", name, "release", rel.Name, "namespace", rel.Namespace, "version", c.SelectedVersion)
+	s.detector.invalidateSnapshot()
 	return s.store.Update(name, func(item *Component) {
 		item.Status = StatusInstalled
+		item.Namespace = rel.Namespace
 		item.ManagedBy = ManagedByKnaic
 		item.LastError = ""
 	})
@@ -96,6 +103,7 @@ func (s *Service) Uninstall(ctx context.Context, name string) (Component, error)
 		})
 		return s.store.Get(name)
 	}
+	s.detector.invalidateSnapshot()
 	return s.store.Update(name, func(item *Component) {
 		item.Status = StatusNotInstalled
 		item.ManagedBy = ""
@@ -125,24 +133,6 @@ func (s *Service) Reconcile(ctx context.Context, name string) (Component, error)
 	return s.store.Update(name, func(item *Component) {
 		item.Status = StatusInstalled
 		item.LastError = ""
-	})
-}
-
-// Adopt marks an Unmanaged component as managed by knaic without re-installing.
-// In a real implementation this would patch labels onto the existing release;
-// for now it just records the state transition.
-func (s *Service) Adopt(ctx context.Context, name string) (Component, error) {
-	c, err := s.store.Get(name)
-	if err != nil {
-		return Component{}, err
-	}
-	if c.Status != StatusUnmanaged {
-		return c, errors.New("component is not Unmanaged")
-	}
-	return s.store.Update(name, func(item *Component) {
-		item.Status = StatusInstalled
-		item.ManagedBy = ManagedByKnaic
-		item.Notes = "Adopted from previous installation."
 	})
 }
 

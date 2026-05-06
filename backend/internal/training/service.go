@@ -36,6 +36,10 @@ func New(dyn dynamic.Interface, mlflow MLflow) *Service {
 	return &Service{dyn: dyn, mlflow: mlflow}
 }
 
+func (s *Service) WithDynamic(dyn dynamic.Interface) *Service {
+	return &Service{dyn: dyn, mlflow: s.mlflow}
+}
+
 // CreateRuntime applies a TrainingRuntime CR. The chart-style template
 // below uses the Trainer v2 mlPolicy + JobSet template shape so the
 // projector can read the framework and resources back out.
@@ -84,8 +88,8 @@ func (s *Service) CreateRuntime(ctx context.Context, namespace string, req Creat
 			},
 			"spec": map[string]any{
 				"mlPolicy": map[string]any{
-					"numNodes":     req.NumNodes,
-					req.Framework:  map[string]any{},
+					"numNodes":    req.NumNodes,
+					req.Framework: map[string]any{},
 				},
 				"template": map[string]any{
 					"spec": map[string]any{

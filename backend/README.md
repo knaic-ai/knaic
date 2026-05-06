@@ -75,10 +75,14 @@ validation.
 
 ### Apiserver impersonation
 
-The namespace selector (`GET /api/v1/namespaces`) lists namespaces filtered by
-the caller's K8s RBAC. For non-admin callers, the backend impersonates the
-verified OIDC identity against the apiserver. Bind a ClusterRole like the
-following to the backend's ServiceAccount:
+User-facing Kubernetes requests are sent to the apiserver with impersonation
+headers derived from the verified OIDC user. This makes Kubernetes RBAC
+enforce list/get/yaml/log and create/update/delete calls for generic
+resources, notebooks, inference resources, and training resources. When
+`KNAIC_AUTH_DISABLED=true`, this is bypassed and the existing backend
+kubeconfig / ServiceAccount is used for local development.
+
+Bind a ClusterRole like the following to the backend's ServiceAccount:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -95,6 +99,10 @@ Make sure your `KNAIC_OIDC_USERNAME_CLAIM` and `KNAIC_OIDC_USERNAME_PREFIX`
 match the apiserver flags (`--oidc-username-claim`, `--oidc-username-prefix`)
 so the impersonated subject matches the names in `RoleBinding.subjects[].name`.
 
+Private Model Hub writes are not direct Kubernetes API calls, so the backend
+uses `SubjectAccessReview` instead. A non-admin user must be allowed to
+`create` `configmaps` in the target namespace to create/import/upload/patch
+private models in that namespace.
 
 ### Configuration
 
@@ -102,6 +110,8 @@ so the impersonated subject matches the names in `RoleBinding.subjects[].name`.
 |---|---|---|
 | `KNAIC_ADDR` | `:8080` | listen address |
 | `KNAIC_SYSTEM_NAMESPACE` | `knaic-system` | install ns for built-in components |
+| `KNAIC_COMPONENT_CATALOG` | _(embedded `catalog.yaml`)_ | path to a YAML file overriding the built-in component catalog |
+| `KNAIC_PUBLIC_MODELS` | _(embedded `models.yaml`)_ | path to a YAML file overriding the public-scope Model Hub seed list. Only seeds when the public scope is empty. |
 | `KUBECONFIG` | _(in-cluster)_ | path to kubeconfig |
 | `KNAIC_OIDC_ISSUER` | _(required unless disabled)_ | Dex / OIDC issuer URL |
 | `KNAIC_OIDC_CLIENT_ID` | `knaic` | OIDC client ID |

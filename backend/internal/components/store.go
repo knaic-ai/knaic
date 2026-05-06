@@ -20,18 +20,29 @@ type Store struct {
 	systemNamespace string
 }
 
-func NewStore(systemNamespace string) *Store {
+// NewStore creates a Store seeded with the catalog at catalogPath. If
+// catalogPath is empty the embedded default catalog is used.
+func NewStore(systemNamespace, catalogPath string) (*Store, error) {
+	catalog, err := LoadCatalog(catalogPath)
+	if err != nil {
+		return nil, err
+	}
 	s := &Store{
 		items:           make(map[string]*Component),
 		systemNamespace: systemNamespace,
 	}
-	for _, c := range builtinCatalog() {
+	for _, c := range catalog {
 		c := c
-		c.Namespace = systemNamespace
+		// The install namespace is unknown until the detector finds the
+		// existing release / CSV / Deployment. Until then, default to the
+		// system namespace so the install action has somewhere to land.
+		if c.Namespace == "" {
+			c.Namespace = systemNamespace
+		}
 		c.Embedded = charts.Has(c.Name)
 		s.items[c.Name] = &c
 	}
-	return s
+	return s, nil
 }
 
 // List returns a deterministic snapshot of all components.

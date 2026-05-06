@@ -11,6 +11,8 @@ type Config struct {
 	Addr            string
 	SystemNamespace string
 	KubeconfigPath  string
+	ComponentCatalog string
+	PublicModelsSeed string
 
 	OIDCIssuer             string
 	OIDCClientID           string
@@ -39,6 +41,8 @@ func Load() (*Config, error) {
 		Addr:                   env("KNAIC_ADDR", ":8080"),
 		SystemNamespace:        env("KNAIC_SYSTEM_NAMESPACE", "knaic-system"),
 		KubeconfigPath:         env("KUBECONFIG", ""),
+		ComponentCatalog:       env("KNAIC_COMPONENT_CATALOG", ""),
+		PublicModelsSeed:       env("KNAIC_PUBLIC_MODELS", ""),
 		OIDCIssuer:             env("KNAIC_OIDC_ISSUER", ""),
 		OIDCClientID:           env("KNAIC_OIDC_CLIENT_ID", "knaic"),
 		OIDCClientSecret:       env("KNAIC_OIDC_CLIENT_SECRET", ""),

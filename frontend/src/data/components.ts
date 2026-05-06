@@ -192,11 +192,48 @@ export const useComponents = () => useStore(componentsStore);
 
 let didInitialLoad = false;
 
+// Tracks which components are currently fetching their cluster status, so
+// the UI can render a spinner for those rows.
+const statusLoadingStore = createStore<Set<string>>(new Set());
+export const useComponentStatusLoading = () => useStore(statusLoadingStore);
+
+function markStatusLoading(name: string, loading: boolean) {
+  statusLoadingStore.set(prev => {
+    const next = new Set(prev);
+    if (loading) next.add(name);
+    else next.delete(name);
+    return next;
+  });
+}
+
 export async function loadFromApi(): Promise<void> {
   if (!apiEnabled) return;
   const items = await api.listComponents();
   componentsStore.set(items);
   didInitialLoad = true;
+  // Status detection is per-component on the backend (see service.Status) so
+  // we fan out one request per row in parallel. The backend caches the
+  // cluster scan for ~5s, so the first request triggers the scan and the
+  // rest pick up the cached snapshot.
+  void refreshAllStatuses(items.map(c => c.name));
+}
+
+export async function refreshAllStatuses(names: string[]): Promise<void> {
+  if (!apiEnabled) return;
+  await Promise.all(names.map(refreshStatus));
+}
+
+export async function refreshStatus(name: string): Promise<void> {
+  if (!apiEnabled) return;
+  markStatusLoading(name, true);
+  try {
+    const updated = await api.fetchComponentStatus(name);
+    replaceOne(updated);
+  } catch {
+    // Fail-soft: keep the prior status; the row's spinner just clears.
+  } finally {
+    markStatusLoading(name, false);
+  }
 }
 
 export function ensureInitialLoad(): void {
@@ -277,17 +314,6 @@ export async function reconcileComponent(name: string): Promise<void> {
   window.setTimeout(() => {
     componentsStore.set(prev => prev.map(c => (c.name === name ? { ...c, status: 'Installed' } : c)));
   }, 1500);
-}
-
-export async function adoptComponent(name: string): Promise<void> {
-  if (apiEnabled) {
-    const updated = await api.adoptComponentApi(name);
-    replaceOne(updated);
-    return;
-  }
-  componentsStore.set(prev =>
-    prev.map(c => (c.name === name ? { ...c, status: 'Installed', managedBy: 'knaic' } : c)),
-  );
 }
 
 export async function addImportedComponent(item: Omit<ComponentItem, 'builtin'>): Promise<void> {

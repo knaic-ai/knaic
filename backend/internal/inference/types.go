@@ -36,6 +36,10 @@ type CreateServiceRequest struct {
 }
 
 // CreateRuntimeRequest is the body of POST /namespaces/{ns}/inference/runtimes.
+//
+// Resource fields mirror CreateServiceRequest so the form on the
+// ServingRuntime page can re-use the same CPU/Memory request+limit + GPU
+// profile picker as the InferenceService form.
 type CreateRuntimeRequest struct {
 	Name                  string   `json:"name"`
 	Image                 string   `json:"image"`
@@ -43,7 +47,14 @@ type CreateRuntimeRequest struct {
 	SupportedModelFormats []string `json:"supportedModelFormats,omitempty"`
 	Args                  []string `json:"args,omitempty"`
 
-	CPULimit    string `json:"cpuLimit,omitempty"`
-	MemoryLimit string `json:"memoryLimit,omitempty"`
-	GPULimit    int64  `json:"gpuLimit,omitempty"`
+	CPURequest    string `json:"cpuRequest,omitempty"`
+	CPULimit      string `json:"cpuLimit,omitempty"`
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	MemoryLimit   string `json:"memoryLimit,omitempty"`
+
+	// GPUValues encodes the resource keys/quantities chosen via the GPU
+	// profile picker — same shape as CreateServiceRequest.GPUValues.
+	// When empty, GPULimit (legacy field) is used as `nvidia.com/gpu`.
+	GPUValues map[string]int64 `json:"gpuValues,omitempty"`
+	GPULimit  int64            `json:"gpuLimit,omitempty"`
 }

@@ -29,8 +29,14 @@ export interface CreateRuntimeRequest {
   runtime: string;
   supportedModelFormats?: string[];
   args?: string[];
+  cpuRequest?: string;
   cpuLimit?: string;
+  memoryRequest?: string;
   memoryLimit?: string;
+  // Resource keys + quantities chosen via the GPU profile picker, mirroring
+  // CreateServiceRequest.gpuValues. When omitted, gpuLimit is used as a
+  // legacy `nvidia.com/gpu` limit.
+  gpuValues?: Record<string, number>;
   gpuLimit?: number;
 }
 
@@ -46,6 +52,13 @@ export function createServingRuntime(ns: string, req: CreateRuntimeRequest): Pro
     method: 'POST',
     body: req,
   });
+}
+
+export function updateServingRuntime(ns: string, name: string, req: CreateRuntimeRequest): Promise<unknown> {
+  return request<unknown>(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/runtimes/${encodeURIComponent(name)}`,
+    { method: 'PUT', body: req },
+  );
 }
 
 // list helpers — combined into a single call that hits both v1beta1 and

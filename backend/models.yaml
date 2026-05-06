@@ -1,0 +1,75 @@
+# Public Model Hub seed list. Loaded at startup; can be overridden at
+# runtime via KNAIC_PUBLIC_MODELS=/path/to/models.yaml.
+#
+# Seeding only fires when the public scope of the configured Store
+# (Postgres or in-memory) is empty. Once admins create/edit/delete models
+# through the UI those changes are authoritative — restarting knaic does
+# not re-apply this list.
+#
+# `scheme` defaults to "hf" when omitted. `tags` and `modelType` are free-
+# form; the UI groups by `modelType` (llm | embedding | diffusion | …).
+models:
+  - name: Qwen/Qwen3.5-7B-Instruct
+    owner: Qwen
+    uri: hf://Qwen/Qwen3.5-7B-Instruct
+    scheme: hf
+    tags: [chat, instruct, text-generation]
+    modelType: llm
+    sizeGB: 15.2
+    readme: |
+      # Qwen3.5 7B Instruct
+
+      Qwen3.5 is the next-generation Qwen model series. The 7B instruct
+      variant is tuned for conversational and tool-use scenarios.
+
+      ## Quick start
+      ```bash
+      vllm serve Qwen/Qwen3.5-7B-Instruct --max-model-len 32768
+      ```
+
+      ## License
+      Apache-2.0
+
+  - name: Qwen/Qwen3.5-72B-Instruct
+    owner: Qwen
+    uri: hf://Qwen/Qwen3.5-72B-Instruct
+    scheme: hf
+    tags: [chat, instruct, flagship]
+    modelType: llm
+    sizeGB: 146.0
+    readme: |
+      # Qwen3.5 72B Instruct
+
+      Flagship instruct model. Requires multi-GPU deployment.
+
+  - name: meta-llama/Llama-3.3-8B-Instruct
+    owner: meta-llama
+    uri: hf://meta-llama/Llama-3.3-8B-Instruct
+    scheme: hf
+    tags: [chat, instruct]
+    modelType: llm
+    sizeGB: 16.8
+    readme: |
+      # Llama 3.3 8B Instruct
+
+  - name: BAAI/bge-large-en-v1.5
+    owner: BAAI
+    uri: hf://BAAI/bge-large-en-v1.5
+    scheme: hf
+    tags: [embedding, retrieval]
+    modelType: embedding
+    sizeGB: 1.3
+    readme: |
+      # BGE Large EN v1.5
+
+      General-purpose English embedding model.
+
+  - name: stabilityai/stable-diffusion-3-medium
+    owner: stabilityai
+    uri: hf://stabilityai/stable-diffusion-3-medium
+    scheme: hf
+    tags: [image, diffusion]
+    modelType: diffusion
+    sizeGB: 14.0
+    readme: |
+      # Stable Diffusion 3 Medium

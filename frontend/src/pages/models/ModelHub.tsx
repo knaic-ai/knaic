@@ -46,7 +46,8 @@ import {
 } from '@/data/models';
 import { useApp } from '@/context/AppContext';
 import { useStorageTargets, targetUri } from '@/data/storageTargets';
-import { useRuntimes, ensureRuntimesLoaded, createInferenceService } from '@/data/inference';
+import { useRuntimes, ensureRuntimesLoaded } from '@/data/inference';
+import { NewInferenceServiceModal } from '@/pages/inference/NewInferenceServiceModal';
 
 const schemeTag: Record<string, { color: string; label: string }> = {
   hf: { color: 'orange', label: 'HuggingFace' },
@@ -82,7 +83,6 @@ export function ModelHub() {
   const [form] = Form.useForm();
   const [importForm] = Form.useForm();
   const [uploadForm] = Form.useForm();
-  const [publishForm] = Form.useForm();
 
   const scoped = useMemo(
     () =>
@@ -112,15 +112,19 @@ export function ModelHub() {
 
   const openPublish = (m: ModelItem) => {
     setPublishModel(m);
-    const defaultRuntime = runtimes.find(r => r.namespace === namespace) ?? runtimes[0];
-    publishForm.setFieldsValue({
-      name: m.name.split('/').pop()?.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-      kind: m.modelType === 'llm' ? 'LLMInferenceService' : 'InferenceService',
-      runtime: defaultRuntime?.name,
-      replicas: 1,
-      gpu: m.modelType === 'llm' ? 1 : 0,
-    });
   };
+
+  const publishDefaults = useMemo(() => {
+    if (!publishModel) return undefined;
+    const defaultRuntime = runtimes.find(r => r.namespace === namespace) ?? runtimes[0];
+    return {
+      name: publishModel.name.split('/').pop()?.toLowerCase().replace(/[^a-z0-9-]/g, '-') ?? '',
+      kind: (publishModel.modelType === 'llm' ? 'LLMInferenceService' : 'InferenceService') as
+        'LLMInferenceService' | 'InferenceService',
+      runtime: defaultRuntime?.name,
+      modelUri: publishModel.uri,
+    };
+  }, [publishModel, runtimes, namespace]);
 
   return (
     <div className="knaic-page">
@@ -442,63 +446,15 @@ export function ModelHub() {
         </Form>
       </Modal>
 
-      <Modal
+      <NewInferenceServiceModal
         open={!!publishModel}
-        title={publishModel ? `Publish ${publishModel.name} to inference` : ''}
-        onCancel={() => setPublishModel(null)}
-        destroyOnClose
-        okText="Create inference service"
-        okButtonProps={{ icon: <RocketOutlined /> }}
-        onOk={async () => {
-          const v = await publishForm.validateFields();
-          if (!publishModel) return;
-          try {
-            await createInferenceService(namespace, {
-              name: v.name,
-              kind: v.kind,
-              runtime: v.runtime,
-              modelUri: publishModel.uri,
-              replicas: v.replicas,
-              cpuRequest: '8',
-              memoryRequest: '64Gi',
-              gpuValues: v.gpu > 0 ? { 'nvidia.com/gpu': v.gpu } : undefined,
-            });
-            setPublishModel(null);
-            publishForm.resetFields();
-            message.success(`Publishing ${publishModel.name} → ${v.name}`);
-            nav('/inference/services');
-          } catch (e) {
-            message.error((e as Error).message);
-          }
-        }}
-      >
-        <Form form={publishForm} layout="vertical" preserve={false}>
-          <Form.Item name="name" label="Service name" rules={[{ required: true, pattern: /^[a-z0-9-]+$/ }]}>
-            <Input placeholder="my-service" />
-          </Form.Item>
-          <Form.Item name="kind" label="Kind" rules={[{ required: true }]}>
-            <Select
-              options={[
-                { label: 'LLMInferenceService (KServe v1alpha1)', value: 'LLMInferenceService' },
-                { label: 'InferenceService (KServe v1beta1)', value: 'InferenceService' },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="runtime" label="Serving runtime" rules={[{ required: true }]}>
-            <Select options={runtimes.map(r => ({ label: `${r.name} · ${r.image}`, value: r.name }))} />
-          </Form.Item>
-          <Form.Item name="replicas" label="Replicas" rules={[{ required: true }]}>
-            <InputNumber min={1} max={16} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item name="gpu" label="GPUs per replica">
-            <InputNumber min={0} max={16} style={{ width: '100%' }} />
-          </Form.Item>
-          <div className="knaic-sub">
-            Target namespace: <b>{namespace}</b>. Model URI: <span className="mono">{publishModel?.uri}</span>.
-            Advanced tuning is available on the Inference services page.
-          </div>
-        </Form>
-      </Modal>
+        namespace={namespace}
+        defaults={publishDefaults}
+        lockModel
+        title={publishModel ? `Publish ${publishModel.name} to inference` : 'Publish to inference'}
+        onClose={() => setPublishModel(null)}
+        onCreated={() => nav('/inference/services')}
+      />
 
       <Drawer
         open={!!detail}

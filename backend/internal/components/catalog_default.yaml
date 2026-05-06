@@ -1,0 +1,127 @@
+# knaic component catalog. Loaded at startup; can be overridden at runtime
+# via KNAIC_COMPONENT_CATALOG=/path/to/catalog.yaml.
+#
+# Each entry is a built-in component. Status, namespace, embedded, and
+# managedBy are filled in by the backend at runtime — do not set here.
+#
+# `chart` is the URL the installer will pull the Helm chart from. Common
+# forms:
+#   - oci://<host>/<path>           — OCI-registry chart (Helm 3.8+)
+#   - https://.../my-chart-1.0.tgz  — direct .tgz download
+#   - https://charts.example.com@chart-name — Helm repo + chart name
+#
+# When `chart` is empty the installer falls back to the chart bundled into
+# the knaic binary (if any).
+components:
+  - name: kserve
+    displayName: KServe
+    description: Standard model inference platform on Kubernetes with LLMInferenceService support.
+    category: Inference
+    versions: [v0.13.0, v0.14.0, v0.15.1]
+    selectedVersion: v0.14.0
+    chart: oci://ghcr.io/kserve/charts/kserve
+    images:
+      - kserve/kserve-controller:v0.14.0
+      - kserve/models-web-app:v0.14.0
+
+  - name: hami
+    displayName: HAMi
+    description: Heterogeneous AI computing virtualization — GPU/NPU sharing scheduler.
+    category: GPU
+    versions: [v2.3.11, v2.4.0]
+    selectedVersion: v2.4.0
+    chart: https://project-hami.github.io/HAMi/charts@hami
+    images:
+      - projecthami/hami:v2.4.0
+      - projecthami/hami-scheduler:v2.4.0
+
+  - name: nvidia-device-plugin
+    displayName: NVIDIA GPU Device Plugin
+    description: Exposes NVIDIA GPUs as schedulable resources on each node.
+    category: GPU
+    versions: [v0.14.5, v0.15.0, v0.17.0]
+    selectedVersion: v0.17.0
+    chart: https://nvidia.github.io/k8s-device-plugin@nvidia-device-plugin
+    images:
+      - nvcr.io/nvidia/k8s-device-plugin:v0.17.0
+
+  - name: kf-notebook-controller
+    displayName: Kubeflow Notebook Controller
+    description: Creates and manages Jupyter notebook servers as Kubernetes resources.
+    category: Notebook
+    versions: [v1.9.0, v1.10.0]
+    selectedVersion: v1.10.0
+    chart: oci://ghcr.io/kubeflow/notebooks/charts/notebook-controller
+    images:
+      - ghcr.io/kubeflow/kubeflow/notebook-controller:v1.10.0
+
+  - name: kf-trainer-v2
+    displayName: Kubeflow Trainer v2
+    description: Next-generation Kubernetes training operator for LLM fine-tuning.
+    category: Training
+    versions: [v2.0.0-rc.0, v2.0.0]
+    selectedVersion: v2.0.0
+    chart: oci://ghcr.io/kubeflow/trainer/charts/trainer
+    images:
+      - kubeflow/trainer-controller-manager:v2.0.0
+
+  - name: envoy-gateway
+    displayName: Envoy Gateway
+    description: Kubernetes-native Envoy Gateway implementation.
+    category: Networking
+    versions: [v1.2.1, v1.3.0]
+    selectedVersion: v1.3.0
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    images:
+      - envoyproxy/gateway:v1.3.0
+
+  - name: envoy-ai-gateway
+    displayName: Envoy AI Gateway
+    description: LLM-aware routing, rate limiting and token quota on top of Envoy Gateway.
+    category: Networking
+    versions: [v0.2.0, v0.3.0]
+    selectedVersion: v0.3.0
+    chart: oci://docker.io/envoyproxy/ai-gateway-helm
+    images:
+      - envoyproxy/ai-gateway:v0.3.0
+
+  - name: lws
+    displayName: LeaderWorkerSet (LWS)
+    description: Multi-host inference / training group scheduling primitive.
+    category: Inference
+    versions: [v0.4.1, v0.5.0]
+    selectedVersion: v0.5.0
+    chart: oci://registry.k8s.io/lws/charts/lws
+    images:
+      - registry.k8s.io/lws/lws:v0.5.0
+
+  - name: jobset
+    displayName: JobSet
+    description: Groups multiple Jobs into a single logical unit for distributed workloads.
+    category: Scheduling
+    versions: [v0.6.0, v0.7.2]
+    selectedVersion: v0.7.2
+    chart: oci://registry.k8s.io/jobset/charts/jobset
+    images:
+      - registry.k8s.io/jobset/jobset:v0.7.2
+
+  - name: prometheus
+    displayName: Prometheus
+    description: Metrics collection and storage — powers the monitoring dashboards.
+    category: Observability
+    versions: [v2.54.0, v2.55.0, v3.0.0]
+    selectedVersion: v2.55.0
+    chart: https://prometheus-community.github.io/helm-charts@prometheus
+    images:
+      - prom/prometheus:v2.55.0
+      - prom/node-exporter:v1.8.2
+
+  - name: mlflow
+    displayName: MLflow
+    description: Experiment tracking and model registry. Used by TrainJobs to report metrics.
+    category: Experiment
+    versions: [v2.16.2, v2.17.1, v2.18.0]
+    selectedVersion: v2.18.0
+    chart: oci://registry-1.docker.io/bitnamicharts/mlflow
+    images:
+      - ghcr.io/mlflow/mlflow:v2.18.0

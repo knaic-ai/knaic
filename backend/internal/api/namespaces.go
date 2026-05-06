@@ -8,6 +8,7 @@ import (
 
 	"github.com/alauda/knaic-backend/internal/admin"
 	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/alauda/knaic-backend/internal/k8s"
 )
 
 // newMyNamespacesHandler returns the lightweight namespace list scoped to the
@@ -25,7 +26,7 @@ func newMyNamespacesHandler(d Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, list)
 			return
 		}
-		username := impersonatedUsername(u, d.UserClaim, d.UserPrefix)
+		username := k8s.UsernameFromUser(u, d.UserClaim, d.UserPrefix)
 		if username == "" {
 			// No impersonation identity available; fall back to empty list
 			// rather than leaking the full cluster contents.
@@ -37,7 +38,7 @@ func newMyNamespacesHandler(d Deps) http.HandlerFunc {
 			writeAdminError(w, err)
 			return
 		}
-		list, err := client.CoreV1().Namespaces().List(r.Context(), metav1.ListOptions{})
+		list, err := client.Typed.CoreV1().Namespaces().List(r.Context(), metav1.ListOptions{})
 		if err != nil {
 			writeAdminError(w, err)
 			return
@@ -50,22 +51,4 @@ func newMyNamespacesHandler(d Deps) http.HandlerFunc {
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 		writeJSON(w, http.StatusOK, out)
 	}
-}
-
-func impersonatedUsername(u *auth.User, claim, prefix string) string {
-	var v string
-	switch claim {
-	case "sub":
-		v = u.Subject
-	case "name":
-		v = u.Name
-	case "email", "":
-		v = u.Email
-	default:
-		v = u.Email
-	}
-	if v == "" {
-		return ""
-	}
-	return prefix + v
 }

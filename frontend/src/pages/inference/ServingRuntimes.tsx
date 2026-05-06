@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Tag, Space, Button, App, Modal, Form, Input, InputNumber, Select } from 'antd';
-import { PlusOutlined, DeleteOutlined, CodeOutlined } from '@ant-design/icons';
+import { Table, Tag, Space, Button, App } from 'antd';
+import { PlusOutlined, DeleteOutlined, CodeOutlined, EditOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import {
   useRuntimes,
   ensureRuntimesLoaded,
   reloadRuntimes,
-  createServingRuntime,
   deleteServingRuntime,
   fetchServingRuntimeYaml,
   buildServingRuntimeYaml,
@@ -14,17 +13,17 @@ import {
 } from '@/data/inference';
 import { useApp } from '@/context/AppContext';
 import { YamlViewer } from '@/components/YamlViewer';
+import { NewServingRuntimeModal } from './NewServingRuntimeModal';
 
 export function ServingRuntimesPage() {
   const { namespace } = useApp();
   const { message, modal } = App.useApp();
   const all = useRuntimes();
   const data = useMemo(() => all.filter(r => r.namespace === namespace || r.builtin), [all, namespace]);
-  const [open, setOpen] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<ServingRuntime | null>(null);
   const [yaml, setYaml] = useState<{ sr: ServingRuntime; text: string } | null>(null);
   const [yamlLoading, setYamlLoading] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [form] = Form.useForm();
 
   useEffect(() => {
     ensureRuntimesLoaded(namespace);
@@ -45,6 +44,15 @@ export function ServingRuntimesPage() {
     }
   };
 
+  const openCreate = () => {
+    setEditing(null);
+    setModalOpen(true);
+  };
+  const openEdit = (r: ServingRuntime) => {
+    setEditing(r);
+    setModalOpen(true);
+  };
+
   return (
     <div className="knaic-page">
       <PageHeader
@@ -53,14 +61,7 @@ export function ServingRuntimesPage() {
         extra={
           <Space>
             <Button onClick={() => reloadRuntimes(namespace)}>Refresh</Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => {
-                form.resetFields();
-                setOpen(true);
-              }}
-            >
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
               New runtime
             </Button>
           </Space>
@@ -84,7 +85,22 @@ export function ServingRuntimesPage() {
           { title: 'Image', dataIndex: 'image', render: v => <span className="mono">{v}</span> },
           {
             title: 'Default resources',
-            render: (_, r) => `${r.resources.cpu || '—'} CPU · ${r.resources.memory || '—'} · ${r.resources.gpu || 0} GPU`,
+            render: (_, r) => {
+              const cpuMem = `${r.resources.cpu || '—'} CPU · ${r.resources.memory || '—'}`;
+              if (r.gpuValues && Object.keys(r.gpuValues).length > 0) {
+                return (
+                  <Space direction="vertical" size={0}>
+                    <span>{cpuMem}</span>
+                    {Object.entries(r.gpuValues).map(([k, v]) => (
+                      <span key={k} className="mono" style={{ fontSize: 12 }}>
+                        {k.split('/').pop()}={v}
+                      </span>
+                    ))}
+                  </Space>
+                );
+              }
+              return `${cpuMem} · ${r.resources.gpu > 0 ? `${r.resources.gpu} GPU` : 'no GPU'}`;
+            },
           },
           {
             title: 'Formats',
@@ -93,9 +109,17 @@ export function ServingRuntimesPage() {
           },
           {
             title: 'Actions',
-            width: 200,
+            width: 240,
             render: (_, r) => (
               <Space>
+                <Button
+                  size="small"
+                  icon={<EditOutlined />}
+                  disabled={r.builtin}
+                  onClick={() => openEdit(r)}
+                >
+                  Edit
+                </Button>
                 <Button
                   size="small"
                   icon={<CodeOutlined />}
@@ -129,60 +153,12 @@ export function ServingRuntimesPage() {
         ]}
       />
 
-      <Modal
-        open={open}
-        title="New serving runtime"
-        width={640}
-        onCancel={() => setOpen(false)}
-        destroyOnClose
-        confirmLoading={submitting}
-        onOk={async () => {
-          const v = await form.validateFields();
-          setSubmitting(true);
-          try {
-            await createServingRuntime(namespace, {
-              name: v.name,
-              image: v.image,
-              runtime: v.runtime,
-              supportedModelFormats: v.supportedModelFormats,
-              args: ((v.defaultArgs as string) ?? '').split('\n').map(s => s.trim()).filter(Boolean),
-              cpuLimit: v.cpu,
-              memoryLimit: v.memory,
-              gpuLimit: v.gpu,
-            });
-            message.success('Runtime created');
-            setOpen(false);
-            form.resetFields();
-          } catch (e) {
-            message.error((e as Error).message);
-          } finally {
-            setSubmitting(false);
-          }
-        }}
-      >
-        <Form form={form} layout="vertical" preserve={false}>
-          <Form.Item name="name" label="Name" rules={[{ required: true }]}>
-            <Input placeholder="my-vllm" />
-          </Form.Item>
-          <Form.Item name="runtime" label="Runtime family" initialValue="vllm" rules={[{ required: true }]}>
-            <Select options={['vllm', 'sglang', 'custom'].map(v => ({ label: v, value: v }))} />
-          </Form.Item>
-          <Form.Item name="image" label="Container image" rules={[{ required: true }]}>
-            <Input placeholder="vllm/vllm-openai:v0.7.2" />
-          </Form.Item>
-          <Form.Item name="supportedModelFormats" label="Supported model formats" initialValue={['huggingface']}>
-            <Select mode="tags" />
-          </Form.Item>
-          <Form.Item name="defaultArgs" label="Default args (one per line)">
-            <Input.TextArea rows={4} placeholder="--max-model-len&#10;32768" />
-          </Form.Item>
-          <Space>
-            <Form.Item name="cpu" label="CPU limit" initialValue="8"><Input style={{ width: 120 }} /></Form.Item>
-            <Form.Item name="memory" label="Memory limit" initialValue="64Gi"><Input style={{ width: 140 }} /></Form.Item>
-            <Form.Item name="gpu" label="GPU limit" initialValue={1}><InputNumber min={0} style={{ width: 100 }} /></Form.Item>
-          </Space>
-        </Form>
-      </Modal>
+      <NewServingRuntimeModal
+        open={modalOpen}
+        namespace={namespace}
+        editing={editing}
+        onClose={() => setModalOpen(false)}
+      />
 
       <YamlViewer
         open={!!yaml}

@@ -9,6 +9,10 @@ export interface ServingRuntime {
   supportedModelFormats: string[];
   defaultArgs: string[];
   resources: { cpu: string; memory: string; gpu: number };
+  // Full accelerator resource map (e.g. HAMi keys gpualloc / gpucores /
+  // gpumem) — present whenever the runtime requests any non-cpu/non-memory
+  // resource. The legacy `resources.gpu` stays for backward compat.
+  gpuValues?: Record<string, number>;
   createdAt: string;
   builtin: boolean;
 }
@@ -31,7 +35,9 @@ export interface InferenceService {
   command?: string[];
   args?: string[];
   endpoint: string;
-  status: 'Ready' | 'Progressing' | 'Failed';
+  status: 'Ready' | 'Progressing' | 'Failed' | 'Stopped';
+  stopped?: boolean;
+  deploymentMode?: string;
   createdAt: string;
 }
 
@@ -109,12 +115,13 @@ const servicesInitial: InferenceService[] = [
   },
 ];
 
-import { apiEnabled } from '@/api/client';
+import { apiEnabled, request } from '@/api/client';
 import {
   listInferenceServices as apiListServices,
   listServingRuntimes as apiListRuntimes,
   createInferenceService as apiCreateService,
   createServingRuntime as apiCreateRuntime,
+  updateServingRuntime as apiUpdateRuntime,
   type CreateServiceRequest,
   type CreateRuntimeRequest,
 } from '@/api/inference';
@@ -218,6 +225,33 @@ export async function createInferenceService(ns: string, req: CreateServiceReque
   ]);
 }
 
+export async function updateServingRuntime(ns: string, name: string, req: CreateRuntimeRequest): Promise<void> {
+  if (apiEnabled) {
+    await apiUpdateRuntime(ns, name, req);
+    reloadRuntimes(ns);
+    return;
+  }
+  runtimesStore.set(prev =>
+    prev.map(r =>
+      r.namespace === ns && r.name === name
+        ? {
+            ...r,
+            runtime: (req.runtime as ServingRuntime['runtime']) ?? r.runtime,
+            image: req.image,
+            supportedModelFormats: req.supportedModelFormats ?? r.supportedModelFormats,
+            defaultArgs: req.args ?? r.defaultArgs,
+            resources: {
+              cpu: req.cpuLimit ?? req.cpuRequest ?? r.resources.cpu,
+              memory: req.memoryLimit ?? req.memoryRequest ?? r.resources.memory,
+              gpu: req.gpuLimit ?? r.resources.gpu,
+            },
+            gpuValues: req.gpuValues ?? r.gpuValues,
+          }
+        : r,
+    ),
+  );
+}
+
 export async function createServingRuntime(ns: string, req: CreateRuntimeRequest): Promise<void> {
   if (apiEnabled) {
     await apiCreateRuntime(ns, req);
@@ -249,6 +283,32 @@ export async function deleteInferenceService(ns: string, name: string, kind: str
     return;
   }
   servicesStore.set(prev => prev.filter(s => !(s.namespace === ns && s.name === name)));
+}
+
+// setInferenceServiceStopped flips the KServe `serving.kserve.io/stop`
+// annotation. Backend route: POST /inference/services/{name}/{stop|start}.
+export async function setInferenceServiceStopped(
+  ns: string,
+  name: string,
+  kind: string,
+  stopped: boolean,
+): Promise<void> {
+  if (apiEnabled) {
+    const action = stopped ? 'stop' : 'start';
+    await request<unknown>(
+      `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(name)}/${action}?kind=${encodeURIComponent(kind)}`,
+      { method: 'POST' },
+    );
+    reloadInferenceServices(ns);
+    return;
+  }
+  servicesStore.set(prev =>
+    prev.map(s =>
+      s.namespace === ns && s.name === name
+        ? { ...s, stopped, status: stopped ? 'Stopped' : 'Progressing' }
+        : s,
+    ),
+  );
 }
 
 export async function deleteServingRuntime(ns: string, name: string): Promise<void> {
