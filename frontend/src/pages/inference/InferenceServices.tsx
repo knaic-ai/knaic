@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Tag, Space, Button, App, Tooltip } from 'antd';
+import { Table, Tag, Space, Button, App, Tooltip, Dropdown } from 'antd';
 import {
   PlusOutlined,
   DeleteOutlined,
@@ -10,6 +10,8 @@ import {
   CopyOutlined,
   ExpandAltOutlined,
   ShrinkOutlined,
+  EditOutlined,
+  MoreOutlined,
 } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
@@ -21,11 +23,13 @@ import {
   fetchInferenceServiceYaml,
   buildInferenceServiceYaml,
   setInferenceServiceStopped,
+  updateInferenceServiceYaml,
   type InferenceService,
 } from '@/data/inference';
 import { useApp } from '@/context/AppContext';
 import { LogViewer } from '@/components/LogViewer';
 import { YamlViewer } from '@/components/YamlViewer';
+import { YamlEditor } from '@/components/YamlEditor';
 import { NewInferenceServiceModal } from './NewInferenceServiceModal';
 
 const MODEL_COLUMN_WIDTH = 280;
@@ -84,7 +88,9 @@ export function InferenceServicesPage() {
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
   const [open, setOpen] = useState(false);
   const [yaml, setYaml] = useState<{ svc: InferenceService; text: string } | null>(null);
+  const [yamlEdit, setYamlEdit] = useState<{ svc: InferenceService; text: string } | null>(null);
   const [yamlLoading, setYamlLoading] = useState<string | null>(null);
+  const [yamlSaving, setYamlSaving] = useState(false);
   const [log, setLog] = useState<InferenceService | null>(null);
 
   useEffect(() => {
@@ -101,6 +107,33 @@ export function InferenceServicesPage() {
       message.warning(`Falling back to local YAML: ${(e as Error).message}`);
     } finally {
       setYamlLoading(null);
+    }
+  };
+
+  const openEditYaml = async (svc: InferenceService) => {
+    setYamlLoading(svc.name);
+    try {
+      const text = await fetchInferenceServiceYaml(namespace, svc.name, svc.kind);
+      setYamlEdit({ svc, text: text || buildInferenceServiceYaml(svc) });
+    } catch (e) {
+      setYamlEdit({ svc, text: buildInferenceServiceYaml(svc) });
+      message.warning(`Falling back to local YAML: ${(e as Error).message}`);
+    } finally {
+      setYamlLoading(null);
+    }
+  };
+
+  const saveYaml = async () => {
+    if (!yamlEdit) return;
+    setYamlSaving(true);
+    try {
+      await updateInferenceServiceYaml(namespace, yamlEdit.svc.name, yamlEdit.svc.kind, yamlEdit.text);
+      message.success('YAML updated');
+      setYamlEdit(null);
+    } catch (e) {
+      message.error((e as Error).message);
+    } finally {
+      setYamlSaving(false);
     }
   };
 
@@ -171,7 +204,7 @@ export function InferenceServicesPage() {
           { title: 'Endpoint', dataIndex: 'endpoint', render: v => <span className="mono">{v}</span> },
           {
             title: 'Actions',
-            width: 300,
+            width: 320,
             render: (_, r) => {
               const isStopped = r.stopped || r.status === 'Stopped';
               return (
@@ -199,24 +232,39 @@ export function InferenceServicesPage() {
                   >
                     YAML
                   </Button>
-                  <Button
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    onClick={() =>
-                      modal.confirm({
-                        title: `Delete service ${r.name}?`,
-                        onOk: async () => {
-                          try {
-                            await deleteInferenceService(namespace, r.name, r.kind);
-                            message.success('Service deleted');
-                          } catch (e) {
-                            message.error((e as Error).message);
-                          }
-                        },
-                      })
-                    }
-                  />
+                  <Dropdown
+                    trigger={['click']}
+                    menu={{
+                      items: [
+                        { key: 'edit-yaml', label: 'Edit YAML', icon: <EditOutlined /> },
+                        { key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true },
+                      ],
+                      onClick: ({ key }) => {
+                        if (key === 'edit-yaml') {
+                          openEditYaml(r);
+                        } else if (key === 'delete') {
+                          modal.confirm({
+                            title: `Delete service ${r.name}?`,
+                            onOk: async () => {
+                              try {
+                                await deleteInferenceService(namespace, r.name, r.kind);
+                                message.success('Service deleted');
+                              } catch (e) {
+                                message.error((e as Error).message);
+                              }
+                            },
+                          });
+                        }
+                      },
+                    }}
+                  >
+                    <Button
+                      size="small"
+                      icon={<MoreOutlined />}
+                      loading={yamlLoading === r.name}
+                      aria-label="More actions"
+                    />
+                  </Dropdown>
                 </Space>
               );
             },
@@ -234,6 +282,15 @@ export function InferenceServicesPage() {
         onClose={() => setYaml(null)}
         title={`${yaml?.svc.kind ?? ''} · ${yaml?.svc.name ?? ''}`}
         yaml={yaml?.text ?? ''}
+      />
+      <YamlEditor
+        open={!!yamlEdit}
+        onClose={() => setYamlEdit(null)}
+        title={`Edit YAML · ${yamlEdit?.svc.kind ?? ''} · ${yamlEdit?.svc.name ?? ''}`}
+        value={yamlEdit?.text ?? ''}
+        saving={yamlSaving}
+        onChange={text => setYamlEdit(cur => (cur ? { ...cur, text } : cur))}
+        onSave={saveYaml}
       />
       <LogViewer
         open={!!log}

@@ -25,6 +25,10 @@ func projectServingRuntime(o *unstructured.Unstructured) Projection {
 		image, _, _ = unstructured.NestedString(c, "image")
 		args, _, _ := unstructured.NestedStringSlice(c, "args")
 		defaultArgs = args
+		cpuRequest := resourceString(c, "resources", "requests", "cpu")
+		cpuLimit := resourceString(c, "resources", "limits", "cpu")
+		memoryRequest := resourceString(c, "resources", "requests", "memory")
+		memoryLimit := resourceString(c, "resources", "limits", "memory")
 		cpu, mem, gpu, gpuMap := containerResources(c)
 		resources["cpu"] = cpu
 		resources["memory"] = mem
@@ -32,14 +36,24 @@ func projectServingRuntime(o *unstructured.Unstructured) Projection {
 			resources["gpu"] = gpu
 		}
 		gpuValues = gpuMap
+		if securityContext, ok, _ := unstructured.NestedMap(c, "securityContext"); ok {
+			p["securityContext"] = securityContext
+		}
+		p["cpuRequest"] = cpuRequest
+		p["cpuLimit"] = cpuLimit
+		p["memoryRequest"] = memoryRequest
+		p["memoryLimit"] = memoryLimit
 	}
-	// Best-effort runtime classifier — matches the prototype's vllm/sglang/custom union.
-	runtime := "custom"
-	switch {
-	case containsCI(image, "vllm"):
-		runtime = "vllm"
-	case containsCI(image, "sglang"):
-		runtime = "sglang"
+	runtime := o.GetLabels()["knaic.io/runtime"]
+	if runtime == "" {
+		// Best-effort runtime classifier for objects not created by knaic.
+		runtime = "custom"
+		switch {
+		case containsCI(image, "vllm"):
+			runtime = "vllm"
+		case containsCI(image, "sglang"):
+			runtime = "sglang"
+		}
 	}
 	p["runtime"] = runtime
 	p["image"] = image
@@ -51,6 +65,26 @@ func projectServingRuntime(o *unstructured.Unstructured) Projection {
 	}
 	p["builtin"] = false
 	return p
+}
+
+func resourceString(obj map[string]any, fields ...string) string {
+	v, ok, _ := unstructured.NestedFieldNoCopy(obj, fields...)
+	if !ok {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case int64:
+		return formatInt(int(t))
+	case int:
+		return formatInt(t)
+	case float64:
+		if t == float64(int64(t)) {
+			return formatInt(int(t))
+		}
+	}
+	return ""
 }
 
 // projectInferenceService matches the v1beta1 KServe shape.
@@ -107,21 +141,34 @@ func projectLLMInferenceService(o *unstructured.Unstructured) Projection {
 		// Some KServe LLM API revisions nest under .spec.model.storageUri.
 		storageURI, _, _ = unstructured.NestedString(o.Object, "spec", "model", "storageUri")
 	}
-	runtime, _, _ := unstructured.NestedString(o.Object, "spec", "runtime")
+	runtime := o.GetLabels()["knaic.io/runtime"]
+	if runtime == "" {
+		runtime, _, _ = unstructured.NestedString(o.Object, "spec", "runtime")
+	}
 	if runtime == "" {
 		runtime, _, _ = unstructured.NestedString(o.Object, "spec", "runtimeRef", "name")
 	}
-	min, _, _ := unstructured.NestedInt64(o.Object, "spec", "minReplicas")
-	if min == 0 && !stopped {
-		min = 1
+	if runtime == "" {
+		if refs, ok, _ := unstructured.NestedSlice(o.Object, "spec", "baseRefs"); ok && len(refs) > 0 {
+			if ref, ok := refs[0].(map[string]any); ok {
+				runtime, _, _ = unstructured.NestedString(ref, "name")
+			}
+		}
 	}
-	max, _, _ := unstructured.NestedInt64(o.Object, "spec", "maxReplicas")
-	if max == 0 {
-		max = min
+	replicas, _, _ := unstructured.NestedInt64(o.Object, "spec", "replicas")
+	if replicas == 0 && !stopped {
+		replicas = 1
 	}
+	min := replicas
+	max := replicas
 	cpu, mem, gpu, gpuValues := "", "", int64(0), map[string]int64(nil)
-	if model, ok, _ := unstructured.NestedMap(o.Object, "spec", "model"); ok {
-		cpu, mem, gpu, gpuValues = containerResources(model)
+	if c, found := nestedFirstContainer(o.Object, "spec", "template", "containers"); found {
+		cpu, mem, gpu, gpuValues = containerResources(c)
+	}
+	if cpu == "" {
+		if model, ok, _ := unstructured.NestedMap(o.Object, "spec", "model"); ok {
+			cpu, mem, gpu, gpuValues = containerResources(model)
+		}
 	}
 	endpoint, _, _ := unstructured.NestedString(o.Object, "status", "url")
 	p["kind"] = "LLMInferenceService"
@@ -252,13 +299,17 @@ func isStopped(o *unstructured.Unstructured) bool {
 		return v == "true" || v == "True"
 	}
 	// Fallback: spec.predictor.minReplicas == 0 && maxReplicas == 0 for v1beta1
-	// or spec.minReplicas == 0 && maxReplicas == 0 for v1alpha1.
+	// or spec.minReplicas == 0 && maxReplicas == 0 for older LLM revisions.
 	for _, base := range [][]string{{"spec", "predictor"}, {"spec"}} {
 		min, minOk, _ := unstructured.NestedInt64(o.Object, append(base, "minReplicas")...)
 		max, maxOk, _ := unstructured.NestedInt64(o.Object, append(base, "maxReplicas")...)
 		if minOk && maxOk && min == 0 && max == 0 {
 			return true
 		}
+	}
+	if o.GetKind() == "LLMInferenceService" {
+		replicas, ok, _ := unstructured.NestedInt64(o.Object, "spec", "replicas")
+		return ok && replicas == 0
 	}
 	return false
 }
@@ -280,6 +331,64 @@ const (
 	stopAnnotation           = "serving.kserve.io/stop"
 	deploymentModeAnnotation = "serving.kserve.io/deploymentMode"
 )
+
+// projectClusterStorageContainer is the lightweight row projection for the
+// Storage Initializer page — name + the bits the user wants to scan in a
+// table (image + supported URI prefixes). YAML view/edit is the source of
+// truth for everything else.
+func projectClusterStorageContainer(o *unstructured.Unstructured) Projection {
+	p := base(o)
+	image, _, _ := unstructured.NestedString(o.Object, "spec", "container", "image")
+	formats, _, _ := unstructured.NestedSlice(o.Object, "spec", "supportedUriFormats")
+	prefixes := make([]string, 0, len(formats))
+	for _, raw := range formats {
+		if m, ok := raw.(map[string]any); ok {
+			if v, _, _ := unstructured.NestedString(m, "prefix"); v != "" {
+				prefixes = append(prefixes, v)
+			} else if v, _, _ := unstructured.NestedString(m, "regex"); v != "" {
+				prefixes = append(prefixes, v)
+			}
+		}
+	}
+	workload, _, _ := unstructured.NestedString(o.Object, "spec", "workloadType")
+	multi, _, _ := unstructured.NestedBool(o.Object, "spec", "supportsMultiModelDownload")
+	p["image"] = image
+	p["supportedUriFormats"] = prefixes
+	p["workloadType"] = workload
+	p["supportsMultiModelDownload"] = multi
+	return p
+}
+
+// projectLLMInferenceServiceConfig surfaces a small summary for the table —
+// these resources have huge specs (full pod template, router, parallelism,
+// scheduler, …), so we only show what helps the user pick one.
+func projectLLMInferenceServiceConfig(o *unstructured.Unstructured) Projection {
+	p := base(o)
+	containers, _, _ := unstructured.NestedSlice(o.Object, "spec", "template", "containers")
+	var image string
+	if len(containers) > 0 {
+		if c, ok := containers[0].(map[string]any); ok {
+			image, _, _ = unstructured.NestedString(c, "image")
+		}
+	}
+	hasRouter := false
+	if _, ok, _ := unstructured.NestedMap(o.Object, "spec", "router"); ok {
+		hasRouter = true
+	}
+	hasWorker := false
+	if _, ok, _ := unstructured.NestedMap(o.Object, "spec", "worker"); ok {
+		hasWorker = true
+	}
+	hasPrefill := false
+	if _, ok, _ := unstructured.NestedMap(o.Object, "spec", "prefill"); ok {
+		hasPrefill = true
+	}
+	p["image"] = image
+	p["hasRouter"] = hasRouter
+	p["hasWorker"] = hasWorker
+	p["hasPrefill"] = hasPrefill
+	return p
+}
 
 func containsCI(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {

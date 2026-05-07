@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/alauda/knaic-backend/internal/auth"
 )
@@ -59,6 +60,7 @@ func (s *Service) Create(ctx context.Context, u *auth.User, req CreateRequest) (
 	if req.ModelType == "" {
 		req.ModelType = "llm"
 	}
+	createdAt := time.Now().UTC()
 	m := Model{
 		ID:        newID("m"),
 		Name:      req.Name,
@@ -70,6 +72,8 @@ func (s *Service) Create(ctx context.Context, u *auth.User, req CreateRequest) (
 		Tags:      req.Tags,
 		ModelType: req.ModelType,
 		SizeGB:    req.SizeGB,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
 		Readme:    req.Readme,
 	}
 	if m.Readme == "" {
@@ -95,6 +99,7 @@ func (s *Service) Import(ctx context.Context, u *auth.User, req ImportRequest) (
 	if len(parts) == 2 {
 		owner = parts[0]
 	}
+	createdAt := time.Now().UTC()
 	m := Model{
 		ID:        newID("m"),
 		Name:      name,
@@ -105,6 +110,8 @@ func (s *Service) Import(ctx context.Context, u *auth.User, req ImportRequest) (
 		Scheme:    scheme,
 		Tags:      []string{"imported"},
 		ModelType: "llm",
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
 		Readme:    fmt.Sprintf("# %s\n\nImported from %s.", name, req.URL),
 	}
 	return s.store.Create(ctx, m)
@@ -132,6 +139,7 @@ func (s *Service) Upload(ctx context.Context, u *auth.User, req UploadRequest) (
 	if !slices.Contains(tags, "uploaded") {
 		tags = append(tags, "uploaded")
 	}
+	createdAt := time.Now().UTC()
 	m := Model{
 		ID:        newID("m"),
 		Name:      req.Name,
@@ -143,6 +151,8 @@ func (s *Service) Upload(ctx context.Context, u *auth.User, req UploadRequest) (
 		Tags:      tags,
 		ModelType: req.ModelType,
 		SizeGB:    req.SizeGB,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
 		Readme:    req.Readme,
 	}
 	if m.Readme == "" {

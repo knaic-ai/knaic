@@ -146,3 +146,38 @@ html[data-theme='dark'] .metric-card .l { color: #94a3b8; }
   transform: translateY(-2px);
   box-shadow: 0 6px 16px rgba(36, 104, 242, 0.12);
 }
+
+.model-filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e4e7eb;
+  border-radius: 3px;
+  background: #fff;
+}
+html[data-theme='dark'] .model-filter-panel {
+  background: #111827;
+  border-color: #22304a;
+}
+
+.model-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+}
+
+.model-sort-control {
+  margin-left: auto;
+}
+
+.model-type-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  flex-wrap: wrap;
+}

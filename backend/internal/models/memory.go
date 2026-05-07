@@ -29,7 +29,15 @@ func (s *MemoryStore) List(_ context.Context, scope Scope, namespace string) ([]
 		}
 		out = append(out, m)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
@@ -51,8 +59,11 @@ func (s *MemoryStore) Create(_ context.Context, m Model) (Model, error) {
 			return Model{}, ErrConflict
 		}
 	}
+	if m.CreatedAt.IsZero() {
+		m.CreatedAt = time.Now().UTC()
+	}
 	if m.UpdatedAt.IsZero() {
-		m.UpdatedAt = time.Now().UTC()
+		m.UpdatedAt = m.CreatedAt
 	}
 	s.items[m.ID] = m
 	return m, nil

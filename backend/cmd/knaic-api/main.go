@@ -98,7 +98,7 @@ func main() {
 	if clients != nil {
 		resSvc = k8sres.NewService(clients.Dynamic, clients.Typed)
 		adminSvc = admin.NewService(clients.Typed)
-		infSvc = inference.New(clients.Dynamic)
+		infSvc = inference.New(clients.Typed, clients.Dynamic, clients.Discovery)
 		nbSvc = notebook.New(clients.Dynamic, clients.Typed)
 		trainSvc = training.New(clients.Dynamic, training.NewREST())
 	}

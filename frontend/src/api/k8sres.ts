@@ -4,7 +4,7 @@
 // knaic-backend/internal/k8sres/projections.go. Add a new entry here when
 // you register a new Kind on the backend.
 
-import { request, apiEnabled, requestText, fetchWithAuth } from './client';
+import { ApiError, request, apiEnabled, requestText, fetchWithAuth } from './client';
 
 export type Slug =
   | 'deployments'
@@ -18,12 +18,17 @@ export type Slug =
   | 'httproutes'
   | 'inferenceservices'
   | 'llminferenceservices'
+  | 'llminferenceserviceconfigs'
   | 'servingruntimes'
   | 'notebooks'
   | 'trainjobs'
   | 'trainingruntimes';
 
-export type ClusterSlug = 'gatewayclasses' | 'clusterservingruntimes' | 'clustertrainingruntimes';
+export type ClusterSlug =
+  | 'gatewayclasses'
+  | 'clusterservingruntimes'
+  | 'clusterstoragecontainers'
+  | 'clustertrainingruntimes';
 
 export function listNamespaced<T>(slug: Slug, ns: string, signal?: AbortSignal): Promise<T[]> {
   return request<T[]>(`/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}`, { signal });
@@ -53,6 +58,34 @@ export function updateNamespaced<T>(slug: Slug, ns: string, name: string, obj: u
   });
 }
 
+export async function updateNamespacedYaml<T>(slug: Slug, ns: string, name: string, yaml: string): Promise<T> {
+  const res = await fetchWithAuth(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}/${encodeURIComponent(name)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/x-yaml' },
+      body: yaml,
+    },
+  );
+  const text = await res.text();
+  let parsed: unknown;
+  if (text) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+  }
+  if (!res.ok) {
+    const msg =
+      parsed && typeof parsed === 'object' && 'error' in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, parsed);
+  }
+  return parsed as T;
+}
+
 export function deleteNamespaced(slug: Slug, ns: string, name: string): Promise<void> {
   return request<void>(
     `/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}/${encodeURIComponent(name)}`,
@@ -70,6 +103,66 @@ export function createCluster<T>(slug: ClusterSlug, obj: unknown): Promise<T> {
 
 export function deleteCluster(slug: ClusterSlug, name: string): Promise<void> {
   return request<void>(`/api/v1/cluster/${slug}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+
+// ---- YAML create paths ---------------------------------------------------
+//
+// The structured create endpoints (POST {ns}/{slug} or POST cluster/{slug})
+// take JSON-encoded objects. The YAML variants below let the user paste a
+// raw manifest into the editor and submit it as application/x-yaml — the
+// backend YAML decoder turns it into the same unstructured.Unstructured.
+
+async function postYaml(path: string, yaml: string): Promise<unknown> {
+  const res = await fetchWithAuth(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-yaml' },
+    body: yaml,
+  });
+  const text = await res.text();
+  let parsed: unknown;
+  if (text) {
+    try { parsed = JSON.parse(text); } catch { parsed = text; }
+  }
+  if (!res.ok) {
+    const msg =
+      parsed && typeof parsed === 'object' && 'error' in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, parsed);
+  }
+  return parsed;
+}
+
+export function createNamespacedYaml(slug: Slug, ns: string, yaml: string): Promise<unknown> {
+  return postYaml(`/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}`, yaml);
+}
+
+export function createClusterYaml(slug: ClusterSlug, yaml: string): Promise<unknown> {
+  return postYaml(`/api/v1/cluster/${slug}`, yaml);
+}
+
+export async function updateClusterYaml(slug: ClusterSlug, name: string, yaml: string): Promise<unknown> {
+  const res = await fetchWithAuth(
+    `/api/v1/cluster/${slug}/${encodeURIComponent(name)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/x-yaml' },
+      body: yaml,
+    },
+  );
+  const text = await res.text();
+  let parsed: unknown;
+  if (text) {
+    try { parsed = JSON.parse(text); } catch { parsed = text; }
+  }
+  if (!res.ok) {
+    const msg =
+      parsed && typeof parsed === 'object' && 'error' in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg, parsed);
+  }
+  return parsed;
 }
 
 // ---- Pod log streaming --------------------------------------------------

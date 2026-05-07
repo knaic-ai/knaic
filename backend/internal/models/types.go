@@ -36,6 +36,7 @@ type Model struct {
 	ModelType string    `json:"modelType"`
 	SizeGB    float64   `json:"sizeGB"`
 	Downloads int       `json:"downloads"`
+	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Readme    string    `json:"readme"`
 }

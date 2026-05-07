@@ -25,6 +25,30 @@ func (a *inferenceAPI) routes(r chi.Router) {
 	r.Post("/services/{name}/start", a.start)
 }
 
+// LLMConfigsHandler is a top-level (non-namespaced) endpoint that lists
+// LLMInferenceServiceConfig refs cluster-wide for the form's "Base config"
+// picker. Returned object: [{name, namespace}].
+func (a *inferenceAPI) LLMConfigsHandler(w http.ResponseWriter, r *http.Request) {
+	configs, err := a.svc.ListLLMConfigs(r.Context())
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, configs)
+}
+
+// DeploymentModesHandler returns the deploymentMode values the cluster's
+// KServe install can handle, plus the configured default. Used by the
+// InferenceService form's "Deployment mode" picker.
+func (a *inferenceAPI) DeploymentModesHandler(w http.ResponseWriter, r *http.Request) {
+	info, err := a.svc.ListDeploymentModes(r.Context())
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
 func (a *inferenceAPI) updateRuntime(w http.ResponseWriter, r *http.Request) {
 	var req inference.CreateRuntimeRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -108,5 +132,5 @@ func (a *inferenceAPI) service(r *http.Request) (*inference.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return inference.New(clients.Dynamic), nil
+	return inference.New(clients.Typed, clients.Dynamic, clients.Discovery), nil
 }

@@ -1,8 +1,12 @@
-import { useEffect } from 'react';
-import { App, Col, Form, Input, Modal, Row, Select } from 'antd';
+import { useEffect, useMemo } from 'react';
+import { App, Col, Collapse, Form, Input, InputNumber, Modal, Row, Select, Switch } from 'antd';
 import {
   createServingRuntime,
+  defaultArgsForRuntimeFamily,
+  defaultRuntimeSecurityContext,
+  defaultServingRuntimeArgs,
   updateServingRuntime,
+  type RuntimeSecurityContext,
   type ServingRuntime,
 } from '@/data/inference';
 import { useGPUProfiles, type GPUProfile } from '@/data/gpuProfiles';
@@ -14,6 +18,7 @@ interface RuntimeFormShape {
   image: string;
   supportedModelFormats?: string[];
   defaultArgs?: string;
+  securityContext: RuntimeSecurityContext;
   cpuRequest: string;
   cpuLimit: string;
   memoryRequest: string;
@@ -31,17 +36,28 @@ interface Props {
   onClose: () => void;
 }
 
-const blankDefaults: RuntimeFormShape = {
-  name: '',
-  runtime: 'vllm',
-  image: '',
-  supportedModelFormats: ['huggingface'],
-  defaultArgs: '',
-  cpuRequest: '8',
-  cpuLimit: '8',
-  memoryRequest: '64Gi',
-  memoryLimit: '64Gi',
-};
+function formatArgs(args: string[]): string {
+  return args.join('\n');
+}
+
+function defaultArgsForRuntime(runtime: string): string {
+  return formatArgs(defaultArgsForRuntimeFamily(runtime));
+}
+
+function blankDefaults(): RuntimeFormShape {
+  return {
+    name: '',
+    runtime: 'vllm',
+    image: '',
+    supportedModelFormats: ['huggingface'],
+    defaultArgs: defaultArgsForRuntime('vllm'),
+    securityContext: defaultRuntimeSecurityContext(),
+    cpuRequest: '8',
+    cpuLimit: '8',
+    memoryRequest: '64Gi',
+    memoryLimit: '64Gi',
+  };
+}
 
 // matchProfile picks the GPU profile whose declared resource keys equal the
 // keys present on the existing runtime, so the edit form re-binds to that
@@ -68,13 +84,12 @@ function defaultsFromRuntime(sr: ServingRuntime, profiles: GPUProfile[]): Runtim
     runtime: sr.runtime,
     image: sr.image,
     supportedModelFormats: sr.supportedModelFormats,
-    defaultArgs: (sr.defaultArgs ?? []).join('\n'),
-    // ServingRuntime doesn't carry separate request/limit — re-use the value
-    // for both fields and let the user widen the limit if they want.
-    cpuRequest: sr.resources.cpu || '',
-    cpuLimit: sr.resources.cpu || '',
-    memoryRequest: sr.resources.memory || '',
-    memoryLimit: sr.resources.memory || '',
+    defaultArgs: (sr.defaultArgs ?? []).join('\n') || defaultArgsForRuntime(sr.runtime),
+    securityContext: sr.securityContext ?? defaultRuntimeSecurityContext(),
+    cpuRequest: sr.cpuRequest ?? sr.resources.cpu ?? '',
+    cpuLimit: sr.cpuLimit ?? sr.resources.cpu ?? '',
+    memoryRequest: sr.memoryRequest ?? sr.resources.memory ?? '',
+    memoryLimit: sr.memoryLimit ?? sr.resources.memory ?? '',
     gpuProfileId: matchProfile(profiles, sr.gpuValues),
     gpuValues: sr.gpuValues,
   };
@@ -86,12 +101,28 @@ export function NewServingRuntimeModal({ open, namespace, editing, onClose }: Pr
   const [form] = Form.useForm<RuntimeFormShape>();
   const isEdit = !!editing;
 
-  // Reset / prefill on open.
+  // Computed once per open + editing change. The Form below carries the
+  // matching `key` so it remounts with these as initialValues — that's the
+  // antd-recommended pattern when the form is shown inside a Modal with
+  // destroyOnClose, and avoids the setFieldsValue/race we used to have.
+  const initialValues = useMemo<RuntimeFormShape>(
+    () => (editing ? defaultsFromRuntime(editing, profiles) : blankDefaults()),
+    [editing, profiles],
+  );
+  const formKey = `${editing?.name ?? 'new'}::${profiles.length}`;
+
+  // When the runtime family changes, replace the args block with the family
+  // default — but only if the current value is empty or matches a known
+  // default, so user-customised args aren't clobbered.
+  const runtime = Form.useWatch('runtime', form);
   useEffect(() => {
     if (!open) return;
-    form.resetFields();
-    form.setFieldsValue(editing ? defaultsFromRuntime(editing, profiles) : blankDefaults);
-  }, [open, editing, profiles, form]);
+    const current = (form.getFieldValue('defaultArgs') ?? '').trim();
+    const knownDefaults = Object.values(defaultServingRuntimeArgs).map(args => formatArgs(args).trim());
+    if (current === '' || knownDefaults.includes(current)) {
+      form.setFieldValue('defaultArgs', defaultArgsForRuntime(runtime ?? ''));
+    }
+  }, [runtime, open, form]);
 
   // "Limit defaults to request" mirroring (matches the InferenceService modal).
   const cpuReq = Form.useWatch('cpuRequest', form);
@@ -121,6 +152,7 @@ export function NewServingRuntimeModal({ open, namespace, editing, onClose }: Pr
           runtime: v.runtime,
           supportedModelFormats: v.supportedModelFormats,
           args: (v.defaultArgs ?? '').split('\n').map(s => s.trim()).filter(Boolean),
+          securityContext: v.securityContext,
           cpuRequest: v.cpuRequest,
           cpuLimit: v.cpuLimit,
           memoryRequest: v.memoryRequest,
@@ -141,7 +173,7 @@ export function NewServingRuntimeModal({ open, namespace, editing, onClose }: Pr
         }
       }}
     >
-      <Form form={form} layout="vertical" preserve={false}>
+      <Form key={formKey} form={form} layout="vertical" initialValues={initialValues}>
         <Form.Item name="name" label="Name" rules={[{ required: true }]}>
           <Input placeholder="my-vllm" disabled={isEdit} />
         </Form.Item>
@@ -155,7 +187,10 @@ export function NewServingRuntimeModal({ open, namespace, editing, onClose }: Pr
           <Select mode="tags" />
         </Form.Item>
         <Form.Item name="defaultArgs" label="Default args (one per line)">
-          <Input.TextArea rows={4} placeholder="--max-model-len&#10;32768" />
+          <Input.TextArea
+            autoSize={{ minRows: 4, maxRows: 20 }}
+            placeholder="--max-model-len&#10;32768"
+          />
         </Form.Item>
         <Row gutter={12}>
           <Col span={12}>
@@ -192,6 +227,73 @@ export function NewServingRuntimeModal({ open, namespace, editing, onClose }: Pr
           </Col>
         </Row>
         <GPUProfileFields />
+        <Collapse
+          size="small"
+          ghost
+          items={[
+            {
+              key: 'security',
+              label: 'Security context',
+              children: (
+                <>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item
+                        name={['securityContext', 'allowPrivilegeEscalation']}
+                        label="Allow privilege escalation"
+                        valuePropName="checked"
+                      >
+                        <Switch />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item
+                        name={['securityContext', 'privileged']}
+                        label="Privileged"
+                        valuePropName="checked"
+                      >
+                        <Switch />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item
+                        name={['securityContext', 'runAsNonRoot']}
+                        label="Run as non-root"
+                        valuePropName="checked"
+                      >
+                        <Switch />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name={['securityContext', 'runAsUser']} label="Run as user">
+                        <InputNumber min={0} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item name={['securityContext', 'capabilities', 'drop']} label="Capabilities drop">
+                        <Select mode="tags" options={[{ label: 'ALL', value: 'ALL' }]} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name={['securityContext', 'capabilities', 'add']} label="Capabilities add">
+                        <Select mode="tags" />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Form.Item name={['securityContext', 'seccompProfile', 'type']} label="Seccomp profile">
+                    <Select
+                      options={['RuntimeDefault', 'Unconfined'].map(v => ({ label: v, value: v }))}
+                    />
+                  </Form.Item>
+                </>
+              ),
+            },
+          ]}
+        />
       </Form>
     </Modal>
   );

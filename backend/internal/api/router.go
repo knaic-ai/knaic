@@ -144,9 +144,16 @@ func NewRouter(d Deps) http.Handler {
 				})
 			}
 			if d.Inference != nil {
+				infAPI := newInferenceAPI(d.Inference, newK8sClientSource(d))
 				r.Route("/namespaces/{namespace}/inference", func(r chi.Router) {
-					newInferenceAPI(d.Inference, newK8sClientSource(d)).routes(r)
+					infAPI.routes(r)
 				})
+				// Cluster-wide endpoints (no {namespace}). Both look at
+				// cluster-scoped state — base configs live in the kserve
+				// namespace and the deployment-mode list comes from KServe's
+				// configmap + Knative discovery.
+				r.Get("/inference/llm-configs", infAPI.LLMConfigsHandler)
+				r.Get("/inference/deployment-modes", infAPI.DeploymentModesHandler)
 			}
 			if d.Notebook != nil {
 				// Mounted under singular "notebook" so it doesn't shadow the

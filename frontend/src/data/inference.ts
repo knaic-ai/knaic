@@ -1,5 +1,19 @@
 import { createStore, useStore, uid } from './store';
 
+export interface RuntimeSecurityContext {
+  allowPrivilegeEscalation?: boolean;
+  capabilities?: {
+    add?: string[];
+    drop?: string[];
+  };
+  privileged?: boolean;
+  runAsNonRoot?: boolean;
+  runAsUser?: number;
+  seccompProfile?: {
+    type?: string;
+  };
+}
+
 export interface ServingRuntime {
   id: string;
   name: string;
@@ -9,10 +23,15 @@ export interface ServingRuntime {
   supportedModelFormats: string[];
   defaultArgs: string[];
   resources: { cpu: string; memory: string; gpu: number };
+  cpuRequest?: string;
+  cpuLimit?: string;
+  memoryRequest?: string;
+  memoryLimit?: string;
   // Full accelerator resource map (e.g. HAMi keys gpualloc / gpucores /
   // gpumem) — present whenever the runtime requests any non-cpu/non-memory
   // resource. The legacy `resources.gpu` stays for backward compat.
   gpuValues?: Record<string, number>;
+  securityContext?: RuntimeSecurityContext;
   createdAt: string;
   builtin: boolean;
 }
@@ -43,6 +62,15 @@ export interface InferenceService {
 
 const nowDate = () => new Date().toISOString().slice(0, 10);
 
+export const defaultServingRuntimeArgs: Record<string, string[]> = {
+  vllm: ['--port', '8080', '--served-model-name', '{{.Name}}', '{{.Namespace}}/{{.Name}}', '--model', '/mnt/models'],
+  sglang: ['--port', '8080', '--served-model-name', '{{.Name}}', '--model-path', '/mnt/models'],
+};
+
+export function defaultArgsForRuntimeFamily(runtime: string): string[] {
+  return defaultServingRuntimeArgs[runtime] ?? [];
+}
+
 const runtimesInitial: ServingRuntime[] = [
   {
     id: uid('sr'),
@@ -51,8 +79,9 @@ const runtimesInitial: ServingRuntime[] = [
     runtime: 'vllm',
     image: 'vllm/vllm-openai:v0.7.2',
     supportedModelFormats: ['huggingface', 'safetensors'],
-    defaultArgs: ['--max-model-len', '32768', '--enable-chunked-prefill'],
+    defaultArgs: defaultArgsForRuntimeFamily('vllm'),
     resources: { cpu: '8', memory: '64Gi', gpu: 1 },
+    securityContext: defaultRuntimeSecurityContext(),
     createdAt: nowDate(),
     builtin: true,
   },
@@ -63,8 +92,9 @@ const runtimesInitial: ServingRuntime[] = [
     runtime: 'sglang',
     image: 'lmsysorg/sglang:v0.4.1',
     supportedModelFormats: ['huggingface', 'safetensors'],
-    defaultArgs: ['--tp', '1', '--mem-fraction-static', '0.88'],
+    defaultArgs: defaultArgsForRuntimeFamily('sglang'),
     resources: { cpu: '8', memory: '64Gi', gpu: 1 },
+    securityContext: defaultRuntimeSecurityContext(),
     createdAt: nowDate(),
     builtin: true,
   },
@@ -124,19 +154,77 @@ import {
   updateServingRuntime as apiUpdateRuntime,
   type CreateServiceRequest,
   type CreateRuntimeRequest,
+  listLLMConfigs as apiListLLMConfigs,
+  listDeploymentModes as apiListDeploymentModes,
+  type LLMConfigRef,
+  type DeploymentModesInfo,
 } from '@/api/inference';
 import {
   fetchYaml as apiFetchYaml,
   deleteNamespaced as apiDeleteNamespaced,
+  updateNamespacedYaml as apiUpdateNamespacedYaml,
 } from '@/api/k8sres';
 
 export const runtimesStore = createStore<ServingRuntime[]>(runtimesInitial);
 export const servicesStore = createStore<InferenceService[]>(servicesInitial);
+export const llmConfigsStore = createStore<LLMConfigRef[]>([]);
 
 export const useRuntimes = () => useStore(runtimesStore);
 export const useInferenceServices = () => useStore(servicesStore);
+export const useLLMConfigs = () => useStore(llmConfigsStore);
 
 const loaded = new Set<string>();
+let llmConfigsLoaded = false;
+
+// LLM base configs are cluster-wide and don't change often, so we load once
+// and cache. reloadLLMConfigs() is exposed below for explicit refreshes
+// (e.g. after the user creates a new LLMInferenceServiceConfig out-of-band).
+export function ensureLLMConfigsLoaded() {
+  if (!apiEnabled || llmConfigsLoaded) return;
+  llmConfigsLoaded = true;
+  apiListLLMConfigs()
+    .then(items => llmConfigsStore.set(items))
+    .catch(() => {
+      llmConfigsLoaded = false;
+    });
+}
+
+export function reloadLLMConfigs() {
+  llmConfigsLoaded = false;
+  ensureLLMConfigsLoaded();
+}
+
+const fallbackDeploymentModes: DeploymentModesInfo = {
+  modes: ['Standard', 'RawDeployment'],
+  default: 'Standard',
+};
+
+export const deploymentModesStore = createStore<DeploymentModesInfo>(fallbackDeploymentModes);
+export const useDeploymentModes = () => useStore(deploymentModesStore);
+
+let deploymentModesLoaded = false;
+
+// Cluster-wide and stable across requests; load once and cache.
+export function ensureDeploymentModesLoaded() {
+  if (!apiEnabled || deploymentModesLoaded) return;
+  deploymentModesLoaded = true;
+  apiListDeploymentModes()
+    .then(info => deploymentModesStore.set(info))
+    .catch(() => {
+      deploymentModesLoaded = false;
+    });
+}
+
+export function defaultRuntimeSecurityContext(): RuntimeSecurityContext {
+  return {
+    allowPrivilegeEscalation: false,
+    capabilities: { drop: ['ALL'], add: [] },
+    privileged: false,
+    runAsNonRoot: true,
+    runAsUser: 1000,
+    seccompProfile: { type: 'RuntimeDefault' },
+  };
+}
 
 function fillRuntimeDefaults(r: ServingRuntime): ServingRuntime {
   return {
@@ -145,6 +233,11 @@ function fillRuntimeDefaults(r: ServingRuntime): ServingRuntime {
     supportedModelFormats: r.supportedModelFormats ?? [],
     defaultArgs: r.defaultArgs ?? [],
     resources: r.resources ?? { cpu: '', memory: '', gpu: 0 },
+    cpuRequest: r.cpuRequest ?? r.resources?.cpu ?? '',
+    cpuLimit: r.cpuLimit ?? r.resources?.cpu ?? '',
+    memoryRequest: r.memoryRequest ?? r.resources?.memory ?? '',
+    memoryLimit: r.memoryLimit ?? r.resources?.memory ?? '',
+    securityContext: r.securityContext ?? defaultRuntimeSecurityContext(),
     builtin: r.builtin ?? false,
   };
 }
@@ -240,6 +333,11 @@ export async function updateServingRuntime(ns: string, name: string, req: Create
             image: req.image,
             supportedModelFormats: req.supportedModelFormats ?? r.supportedModelFormats,
             defaultArgs: req.args ?? r.defaultArgs,
+            cpuRequest: req.cpuRequest ?? r.cpuRequest,
+            cpuLimit: req.cpuLimit ?? r.cpuLimit,
+            memoryRequest: req.memoryRequest ?? r.memoryRequest,
+            memoryLimit: req.memoryLimit ?? r.memoryLimit,
+            securityContext: req.securityContext ?? r.securityContext ?? defaultRuntimeSecurityContext(),
             resources: {
               cpu: req.cpuLimit ?? req.cpuRequest ?? r.resources.cpu,
               memory: req.memoryLimit ?? req.memoryRequest ?? r.resources.memory,
@@ -267,7 +365,12 @@ export async function createServingRuntime(ns: string, req: CreateRuntimeRequest
       image: req.image,
       supportedModelFormats: req.supportedModelFormats ?? ['huggingface'],
       defaultArgs: req.args ?? [],
-      resources: { cpu: '', memory: req.memoryLimit ?? '', gpu: req.gpuLimit ?? 0 },
+      cpuRequest: req.cpuRequest,
+      cpuLimit: req.cpuLimit,
+      memoryRequest: req.memoryRequest,
+      memoryLimit: req.memoryLimit,
+      securityContext: req.securityContext ?? defaultRuntimeSecurityContext(),
+      resources: { cpu: req.cpuRequest ?? '', memory: req.memoryRequest ?? '', gpu: req.gpuLimit ?? 0 },
       createdAt: new Date().toISOString().slice(0, 10),
       builtin: false,
     }),
@@ -331,7 +434,39 @@ export async function fetchServingRuntimeYaml(ns: string, name: string): Promise
   return apiFetchYaml('servingruntimes', ns, name);
 }
 
+export async function updateInferenceServiceYaml(
+  ns: string,
+  name: string,
+  kind: string,
+  yaml: string,
+): Promise<void> {
+  if (!apiEnabled) throw new Error('API not configured — cannot update YAML');
+  const slug = kind === 'LLMInferenceService' ? 'llminferenceservices' : 'inferenceservices';
+  await apiUpdateNamespacedYaml(slug, ns, name, yaml);
+  reloadInferenceServices(ns);
+}
+
+export async function updateServingRuntimeYaml(ns: string, name: string, yaml: string): Promise<void> {
+  if (!apiEnabled) throw new Error('API not configured — cannot update YAML');
+  await apiUpdateNamespacedYaml('servingruntimes', ns, name, yaml);
+  reloadRuntimes(ns);
+}
+
 export function buildServingRuntimeYaml(sr: ServingRuntime): string {
+  const sc = sr.securityContext ?? defaultRuntimeSecurityContext();
+  const drop = sc.capabilities?.drop ?? [];
+  const add = sc.capabilities?.add ?? [];
+  const capabilitiesYaml =
+    drop.length || add.length
+      ? `\n        capabilities:${drop.length ? `\n          drop:\n${drop.map(v => `            - ${v}`).join('\n')}` : ''}${add.length ? `\n          add:\n${add.map(v => `            - ${v}`).join('\n')}` : ''}`
+      : '';
+  const securityContextYaml = `      securityContext:
+        allowPrivilegeEscalation: ${sc.allowPrivilegeEscalation ?? false}${capabilitiesYaml}
+        privileged: ${sc.privileged ?? false}
+        runAsNonRoot: ${sc.runAsNonRoot ?? true}
+        runAsUser: ${sc.runAsUser ?? 1000}
+        seccompProfile:
+          type: ${sc.seccompProfile?.type ?? 'RuntimeDefault'}`;
   return `apiVersion: serving.kserve.io/v1alpha1
 kind: ServingRuntime
 metadata:
@@ -350,6 +485,7 @@ ${sr.defaultArgs.map(a => `        - "${a}"`).join('\n')}
           cpu: "${sr.resources.cpu}"
           memory: ${sr.resources.memory}
           nvidia.com/gpu: ${sr.resources.gpu}
+${securityContextYaml}
 `;
 }
 

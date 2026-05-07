@@ -5,14 +5,23 @@
 
 import { request } from './client';
 import { listNamespaced } from './k8sres';
-import type { InferenceService, ServingRuntime } from '@/data/inference';
+import type { InferenceService, RuntimeSecurityContext, ServingRuntime } from '@/data/inference';
 
 export interface CreateServiceRequest {
   name: string;
   kind: 'InferenceService' | 'LLMInferenceService';
-  runtime: string;
+  // ServingRuntime ref — InferenceService only.
+  runtime?: string;
   modelUri: string;
   replicas: number;
+  // LLMInferenceService-only: list of LLMInferenceServiceConfig names that
+  // get merged into the spec via spec.baseRefs[].
+  baseConfigs?: string[];
+  modelName?: string;
+  containerImage?: string;
+  // InferenceService-only: pins the `serving.kserve.io/deploymentMode`
+  // annotation. Pick from listDeploymentModes() / DeploymentModesInfo.modes.
+  deploymentMode?: string;
   cpuRequest: string;
   cpuLimit?: string;
   memoryRequest: string;
@@ -23,12 +32,31 @@ export interface CreateServiceRequest {
   args?: string[];
 }
 
+export interface LLMConfigRef {
+  name: string;
+  namespace: string;
+}
+
+export function listLLMConfigs(): Promise<LLMConfigRef[]> {
+  return request<LLMConfigRef[]>('/api/v1/inference/llm-configs');
+}
+
+export interface DeploymentModesInfo {
+  modes: string[];
+  default: string;
+}
+
+export function listDeploymentModes(): Promise<DeploymentModesInfo> {
+  return request<DeploymentModesInfo>('/api/v1/inference/deployment-modes');
+}
+
 export interface CreateRuntimeRequest {
   name: string;
   image: string;
   runtime: string;
   supportedModelFormats?: string[];
   args?: string[];
+  securityContext?: RuntimeSecurityContext;
   cpuRequest?: string;
   cpuLimit?: string;
   memoryRequest?: string;

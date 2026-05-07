@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS knaic_models (
     model_type  TEXT NOT NULL DEFAULT '',
     size_gb     DOUBLE PRECISION NOT NULL DEFAULT 0,
     downloads   INTEGER NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     readme      TEXT NOT NULL DEFAULT ''
 );
@@ -35,6 +36,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS knaic_models_uniq
 
 CREATE INDEX IF NOT EXISTS knaic_models_scope_ns
     ON knaic_models (scope, namespace);
+
+ALTER TABLE knaic_models
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 `
 
 type PostgresStore struct {
@@ -70,6 +74,7 @@ type modelRow struct {
 	ModelType string         `db:"model_type"`
 	SizeGB    float64        `db:"size_gb"`
 	Downloads int            `db:"downloads"`
+	CreatedAt time.Time      `db:"created_at"`
 	UpdatedAt time.Time      `db:"updated_at"`
 	Readme    string         `db:"readme"`
 }
@@ -87,6 +92,7 @@ func (r modelRow) toModel() Model {
 		ModelType: r.ModelType,
 		SizeGB:    r.SizeGB,
 		Downloads: r.Downloads,
+		CreatedAt: r.CreatedAt,
 		UpdatedAt: r.UpdatedAt,
 		Readme:    r.Readme,
 	}
@@ -95,7 +101,7 @@ func (r modelRow) toModel() Model {
 func (s *PostgresStore) List(ctx context.Context, scope Scope, namespace string) ([]Model, error) {
 	var rows []modelRow
 	q := `SELECT * FROM knaic_models WHERE scope = $1 AND ($2 = '' OR namespace = $2)
-	      ORDER BY updated_at DESC`
+	      ORDER BY created_at DESC, name ASC, id ASC`
 	if err := s.db.SelectContext(ctx, &rows, q, string(scope), namespace); err != nil {
 		return nil, err
 	}
@@ -119,15 +125,21 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (Model, error) {
 
 func (s *PostgresStore) Create(ctx context.Context, m Model) (Model, error) {
 	if m.UpdatedAt.IsZero() {
-		m.UpdatedAt = time.Now().UTC()
+		if m.CreatedAt.IsZero() {
+			m.CreatedAt = time.Now().UTC()
+		}
+		m.UpdatedAt = m.CreatedAt
+	}
+	if m.CreatedAt.IsZero() {
+		m.CreatedAt = m.UpdatedAt
 	}
 	q := `INSERT INTO knaic_models
-	      (id, name, owner, scope, namespace, uri, scheme, tags, model_type, size_gb, downloads, updated_at, readme)
-	      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
+	      (id, name, owner, scope, namespace, uri, scheme, tags, model_type, size_gb, downloads, created_at, updated_at, readme)
+	      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`
 	_, err := s.db.ExecContext(ctx, q,
 		m.ID, m.Name, m.Owner, string(m.Scope), m.Namespace,
 		m.URI, string(m.Scheme), pq.StringArray(m.Tags), m.ModelType,
-		m.SizeGB, m.Downloads, m.UpdatedAt, m.Readme,
+		m.SizeGB, m.Downloads, m.CreatedAt, m.UpdatedAt, m.Readme,
 	)
 	if err != nil {
 		// Translate the unique-violation error (SQLSTATE 23505) into our

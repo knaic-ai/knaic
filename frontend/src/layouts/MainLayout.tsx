@@ -94,6 +94,8 @@ export function MainLayout() {
         children: [
           { key: '/inference/serving-runtimes', label: <Link to="/inference/serving-runtimes">Serving Runtimes</Link> },
           { key: '/inference/services', label: <Link to="/inference/services">Inference Services</Link> },
+          { key: '/inference/storage-initializers', label: <Link to="/inference/storage-initializers">Storage Initializer</Link> },
+          { key: '/inference/llm-configs', label: <Link to="/inference/llm-configs">LLM Inference Config</Link> },
         ],
       },
       {

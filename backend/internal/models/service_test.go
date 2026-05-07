@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/alauda/knaic-backend/internal/auth"
 )
@@ -40,5 +41,47 @@ func TestPlatformAdminPrivateModelWriteStillWorksWithoutAuthorizer(t *testing.T)
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
+	}
+}
+
+func TestMemoryStoreListsByCreationTimeNewestFirst(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+	oldCreated := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	newCreated := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	oldUpdated := time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)
+
+	if _, err := store.Create(ctx, Model{
+		ID:        "old",
+		Name:      "old",
+		Scope:     ScopePublic,
+		URI:       "hf://old",
+		Scheme:    SchemeHF,
+		CreatedAt: oldCreated,
+		UpdatedAt: oldUpdated,
+	}); err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if _, err := store.Create(ctx, Model{
+		ID:        "new",
+		Name:      "new",
+		Scope:     ScopePublic,
+		URI:       "hf://new",
+		Scheme:    SchemeHF,
+		CreatedAt: newCreated,
+		UpdatedAt: newCreated,
+	}); err != nil {
+		t.Fatalf("create new: %v", err)
+	}
+
+	got, err := store.List(ctx, ScopePublic, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].ID != "new" || got[1].ID != "old" {
+		t.Fatalf("order = %s, %s; want new, old", got[0].ID, got[1].ID)
 	}
 }

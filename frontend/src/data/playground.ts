@@ -11,7 +11,7 @@ export interface LLMProvider {
   apiKey?: string;
   model: string;
   description?: string;
-  status: 'Ready' | 'Progressing' | 'Failed';
+  status: 'Ready' | 'Progressing' | 'Failed' | 'Stopped';
 }
 
 const initial: LLMProvider[] = [

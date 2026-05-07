@@ -16,6 +16,7 @@ import {
   Upload,
   Empty,
   InputNumber,
+  Segmented,
 } from 'antd';
 import {
   PlusOutlined,
@@ -56,6 +57,32 @@ const schemeTag: Record<string, { color: string; label: string }> = {
   oci: { color: 'geekblue', label: 'OCI' },
 };
 
+type ModelSort = 'created-desc' | 'created-asc' | 'name-asc';
+
+const sortOptions: { label: string; value: ModelSort }[] = [
+  { label: 'Creation time: newest first', value: 'created-desc' },
+  { label: 'Creation time: oldest first', value: 'created-asc' },
+  { label: 'Alphabetical', value: 'name-asc' },
+];
+
+const nameCollator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+
+function modelTime(value: string): number {
+  const ts = Date.parse(value);
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+function sortModels(items: ModelItem[], sortBy: ModelSort): ModelItem[] {
+  return [...items].sort((a, b) => {
+    if (sortBy === 'name-asc') {
+      return nameCollator.compare(a.name, b.name) || modelTime(b.createdAt) - modelTime(a.createdAt) || a.id.localeCompare(b.id);
+    }
+    const delta = modelTime(a.createdAt) - modelTime(b.createdAt);
+    const byTime = sortBy === 'created-asc' ? delta : -delta;
+    return byTime || nameCollator.compare(a.name, b.name) || a.id.localeCompare(b.id);
+  });
+}
+
 export function ModelHub() {
   const { scope } = useParams<{ scope: ModelScope }>();
   const actualScope = (scope ?? 'public') as ModelScope;
@@ -75,6 +102,8 @@ export function ModelHub() {
 
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [sortBy, setSortBy] = useState<ModelSort>('created-desc');
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -92,20 +121,34 @@ export function ModelHub() {
     [models, actualScope, namespace],
   );
 
-  const filtered = useMemo(
-    () =>
-      scoped.filter(m => {
+  const visibleModels = useMemo(
+    () => {
+      const items = scoped.filter(m => {
         if (search && !m.name.toLowerCase().includes(search.toLowerCase())) return false;
         if (tagFilter && !m.tags.includes(tagFilter)) return false;
+        if (typeFilter !== 'all' && m.modelType !== typeFilter) return false;
         return true;
-      }),
-    [scoped, search, tagFilter],
+      });
+      return sortModels(items, sortBy);
+    },
+    [scoped, search, tagFilter, typeFilter, sortBy],
   );
 
   const allTags = useMemo(
     () => Array.from(new Set(scoped.flatMap(m => m.tags))).sort(),
     [scoped],
   );
+
+  const allModelTypes = useMemo(
+    () => Array.from(new Set(scoped.map(m => m.modelType).filter(Boolean))).sort(nameCollator.compare),
+    [scoped],
+  );
+
+  useEffect(() => {
+    if (typeFilter !== 'all' && !allModelTypes.includes(typeFilter)) {
+      setTypeFilter('all');
+    }
+  }, [allModelTypes, typeFilter]);
 
   const canWritePublic = user.isPlatformAdmin;
   const canWrite = actualScope === 'public' ? canWritePublic : true;
@@ -167,27 +210,53 @@ export function ModelHub() {
         }
       />
 
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Input.Search
-          placeholder="Search by name"
-          allowClear
-          onChange={e => setSearch(e.target.value)}
-          style={{ width: 280 }}
-        />
-        <Select
-          allowClear
-          placeholder="Filter by tag"
-          options={allTags.map(t => ({ label: t, value: t }))}
-          onChange={setTagFilter}
-          style={{ width: 200 }}
-        />
-      </Space>
+      <div className="model-filter-panel">
+        <div className="model-filter-row">
+          <Space wrap align="center" size={[12, 8]}>
+            <Input.Search
+              placeholder="Search by name"
+              allowClear
+              onChange={e => setSearch(e.target.value)}
+              style={{ width: 260 }}
+            />
+            <Select
+              allowClear
+              placeholder="Filter by tag"
+              options={allTags.map(t => ({ label: t, value: t }))}
+              onChange={setTagFilter}
+              style={{ width: 200 }}
+            />
+          </Space>
+          <Space align="center" size={8} className="model-sort-control">
+            <span className="knaic-sub">Sort by</span>
+            <Select
+              value={sortBy}
+              options={sortOptions}
+              onChange={setSortBy}
+              style={{ width: 230 }}
+              aria-label="Sort by"
+            />
+          </Space>
+        </div>
+        <div className="model-type-filter">
+          <span className="knaic-sub">Model type</span>
+          <Segmented
+            size="small"
+            value={typeFilter}
+            options={[
+              { label: 'All', value: 'all' },
+              ...allModelTypes.map(t => ({ label: t, value: t })),
+            ]}
+            onChange={value => setTypeFilter(String(value))}
+          />
+        </div>
+      </div>
 
-      {filtered.length === 0 ? (
+      {visibleModels.length === 0 ? (
         <Empty description="No models match these filters." />
       ) : (
         <Row gutter={[12, 12]}>
-          {filtered.map(m => {
+          {visibleModels.map(m => {
             const sch = schemeTag[m.scheme] ?? { color: 'default', label: m.scheme };
             return (
               <Col xs={24} md={12} xl={8} key={m.id}>
@@ -270,6 +339,7 @@ export function ModelHub() {
                     <Space size={16} className="knaic-sub" wrap>
                       <span>Size: {m.sizeGB.toFixed(1)} GiB</span>
                       <span>Downloads: {m.downloads}</span>
+                      <span>Created: {m.createdAt}</span>
                       <span>Updated: {m.updatedAt}</span>
                     </Space>
                   </Space>
@@ -507,6 +577,7 @@ export function ModelHub() {
                     </div>
                     <div className="k">Size</div><div>{detail.sizeGB.toFixed(1)} GiB</div>
                     <div className="k">Downloads</div><div>{detail.downloads}</div>
+                    <div className="k">Created</div><div>{detail.createdAt}</div>
                     <div className="k">Updated</div><div>{detail.updatedAt}</div>
                   </div>
                 ),

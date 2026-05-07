@@ -23,6 +23,8 @@ import { UsersPage } from './pages/users/Users';
 import { RolesPage } from './pages/users/Roles';
 import { ServingRuntimesPage } from './pages/inference/ServingRuntimes';
 import { InferenceServicesPage } from './pages/inference/InferenceServices';
+import { StorageContainersPage } from './pages/inference/StorageContainers';
+import { LLMConfigsPage } from './pages/inference/LLMConfigs';
 import { LLMRegistry } from './pages/playground/Registry';
 import { Chat } from './pages/playground/Chat';
 import { Agent } from './pages/playground/Agent';
@@ -59,6 +61,8 @@ export default function App() {
         <Route path="/users/roles" element={<RolesPage />} />
         <Route path="/inference/serving-runtimes" element={<ServingRuntimesPage />} />
         <Route path="/inference/services" element={<InferenceServicesPage />} />
+        <Route path="/inference/storage-initializers" element={<StorageContainersPage />} />
+        <Route path="/inference/llm-configs" element={<LLMConfigsPage />} />
         <Route path="/playground/registry" element={<LLMRegistry />} />
         <Route path="/playground/chat" element={<Chat />} />
         <Route path="/playground/agent" element={<Agent />} />

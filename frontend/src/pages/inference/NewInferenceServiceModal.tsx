@@ -3,8 +3,12 @@ import { App, Button, Col, Collapse, Form, Input, InputNumber, Modal, Row, Segme
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import {
   createInferenceService,
+  ensureDeploymentModesLoaded,
   ensureInferenceServicesLoaded,
+  ensureLLMConfigsLoaded,
   ensureRuntimesLoaded,
+  useDeploymentModes,
+  useLLMConfigs,
   useRuntimes,
 } from '@/data/inference';
 import { ensureModelsLoaded, useModels } from '@/data/models';
@@ -28,7 +32,13 @@ export interface InferenceFormDefaults {
 interface FormShape {
   name: string;
   kind: InferenceKind;
-  runtime: string;
+  // InferenceService only.
+  runtime?: string;
+  deploymentMode?: string;
+  // LLMInferenceService only.
+  baseConfigs?: string[];
+  modelName?: string;
+  containerImage?: string;
   modelUri: string;
   replicas: number;
   cpuRequest: string;
@@ -77,6 +87,8 @@ export function NewInferenceServiceModal({
 }: Props) {
   const { message } = App.useApp();
   const runtimes = useRuntimes();
+  const llmConfigs = useLLMConfigs();
+  const deploymentModes = useDeploymentModes();
   const models = useModels();
   const profiles = useGPUProfiles();
   const [form] = Form.useForm<FormShape>();
@@ -85,9 +97,25 @@ export function NewInferenceServiceModal({
     if (!open) return;
     ensureRuntimesLoaded(namespace);
     ensureInferenceServicesLoaded(namespace);
+    ensureLLMConfigsLoaded();
+    ensureDeploymentModesLoaded();
     ensureModelsLoaded('public');
     ensureModelsLoaded('private', namespace);
   }, [open, namespace]);
+
+  // Watch the kind so the form can swap runtime ↔ base-config picker.
+  const kind = Form.useWatch('kind', form) ?? defaults?.kind ?? 'LLMInferenceService';
+  const isLLM = kind === 'LLMInferenceService';
+
+  // Default the deploymentMode field to whatever the cluster reports as its
+  // default — but only on first encounter, so the user's manual picks stick.
+  useEffect(() => {
+    if (!open || isLLM) return;
+    const current = form.getFieldValue('deploymentMode');
+    if (!current) {
+      form.setFieldValue('deploymentMode', deploymentModes.default);
+    }
+  }, [open, isLLM, deploymentModes.default, form]);
 
   useEffect(() => {
     if (!open) return;
@@ -108,6 +136,11 @@ export function NewInferenceServiceModal({
     .filter(r => r.namespace === namespace || r.builtin)
     .map(r => ({ label: `${r.name} · ${r.image}`, value: r.name }));
 
+  const llmConfigOpts = llmConfigs.map(c => ({
+    label: `${c.namespace}/${c.name}`,
+    value: c.name,
+  }));
+
   const modelOpts = models
     .filter(m => m.scope === 'public' || (m.scope === 'private' && m.namespace === namespace))
     .map(m => ({ label: `${m.name} — ${m.uri}`, value: m.uri }));
@@ -125,10 +158,20 @@ export function NewInferenceServiceModal({
         const profile = profiles.find(p => p.id === v.gpuProfileId);
         const gpuValues = profile && v.gpuValues ? v.gpuValues : undefined;
         try {
+          const llm = v.kind === 'LLMInferenceService';
           await createInferenceService(namespace, {
             name: v.name,
             kind: v.kind,
-            runtime: v.runtime,
+            // Runtime ref only applies to InferenceService; the backend
+            // ignores it for LLM kind, but we omit it to keep the payload tidy.
+            runtime: llm ? undefined : v.runtime,
+            // serving.kserve.io/deploymentMode annotation — InferenceService
+            // only. KServe picks its own default for LLMInferenceService.
+            deploymentMode: llm ? undefined : v.deploymentMode,
+            // LLM-only fields — likewise omitted for InferenceService.
+            baseConfigs: llm ? v.baseConfigs : undefined,
+            modelName: llm ? v.modelName : undefined,
+            containerImage: llm ? v.containerImage : undefined,
             modelUri: v.modelUri,
             replicas: v.replicas,
             cpuRequest: v.cpuRequest,
@@ -168,9 +211,59 @@ export function NewInferenceServiceModal({
             disabled={lockModel}
           />
         </Form.Item>
-        <Form.Item name="runtime" label="Serving runtime" rules={[{ required: true }]}>
-          <Select options={runtimeOpts} placeholder="Pick a ServingRuntime" />
-        </Form.Item>
+        {isLLM ? (
+          <>
+            <Form.Item
+              name="baseConfigs"
+              label="Base config"
+              tooltip="LLMInferenceServiceConfig CRs whose template/router/parallelism etc. are merged into this service's spec via spec.baseRefs."
+            >
+              <Select
+                mode="multiple"
+                allowClear
+                options={llmConfigOpts}
+                placeholder="(optional) pick one or more LLMInferenceServiceConfigs"
+              />
+            </Form.Item>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item
+                  name="modelName"
+                  label="Model name"
+                  tooltip="Optional spec.model.name. Used by some runtimes as the served model id."
+                >
+                  <Input placeholder="qwen3-5-7b" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item
+                  name="containerImage"
+                  label="Container image (override)"
+                  tooltip="Leave empty to inherit the image from the chosen base config."
+                >
+                  <Input placeholder="vllm/vllm-openai:v0.7.2" />
+                </Form.Item>
+              </Col>
+            </Row>
+          </>
+        ) : (
+          <>
+            <Form.Item name="runtime" label="Serving runtime" rules={[{ required: true }]}>
+              <Select options={runtimeOpts} placeholder="Pick a ServingRuntime" />
+            </Form.Item>
+            <Form.Item
+              name="deploymentMode"
+              label="Deployment mode"
+              tooltip="Pinned via the serving.kserve.io/deploymentMode annotation. Modes the cluster's KServe install can handle are listed here; the cluster's configured default is pre-selected."
+            >
+              <Select
+                options={deploymentModes.modes.map(m => ({ label: m, value: m }))}
+                placeholder="Use cluster default"
+                allowClear
+              />
+            </Form.Item>
+          </>
+        )}
         <Form.Item name="replicas" label="Replicas" rules={[{ required: true }]}>
           <InputNumber min={1} max={32} style={{ width: 180 }} />
         </Form.Item>
@@ -244,7 +337,10 @@ export function NewInferenceServiceModal({
                     <Input placeholder="python -m vllm.entrypoints.openai.api_server" />
                   </Form.Item>
                   <Form.Item name="args" label="Args (one per line)">
-                    <Input.TextArea rows={3} placeholder="--max-model-len&#10;32768" />
+                    <Input.TextArea
+                      autoSize={{ minRows: 3, maxRows: 16 }}
+                      placeholder="--max-model-len&#10;32768"
+                    />
                   </Form.Item>
                 </>
               ),

@@ -9,6 +9,19 @@
 # `scheme` defaults to "hf" when omitted. `tags` and `modelType` are free-
 # form; the UI groups by `modelType` (llm | embedding | diffusion | …).
 models:
+  - name: Qwen/Qwen3.5-0.8B
+    owner: Qwen
+    uri: hf://Qwen/Qwen3.5-0.8B
+    scheme: hf
+    tags: [text-generation, small]
+    modelType: llm
+    sizeGB: 1.8
+    readme: |
+      # Qwen3.5 0.8B
+
+      Compact Qwen3.5 base model suitable for lightweight inference and
+      development environments.
+
   - name: Qwen/Qwen3.5-7B-Instruct
     owner: Qwen
     uri: hf://Qwen/Qwen3.5-7B-Instruct

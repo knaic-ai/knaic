@@ -15,6 +15,7 @@ export interface ModelItem {
   modelType: string;
   sizeGB: number;
   downloads: number;
+  createdAt: string;
   updatedAt: string;
   readme: string;
 }
@@ -33,6 +34,7 @@ const initial: ModelItem[] = [
     modelType: 'llm',
     sizeGB: 15.2,
     downloads: 4219,
+    createdAt: now(),
     updatedAt: now(),
     readme: `# Qwen3.5 7B Instruct
 
@@ -58,6 +60,7 @@ Apache-2.0`,
     modelType: 'llm',
     sizeGB: 146.0,
     downloads: 812,
+    createdAt: now(),
     updatedAt: now(),
     readme: '# Qwen3.5 72B Instruct\n\nFlagship instruct model. Requires multi-GPU deployment.',
   },
@@ -72,6 +75,7 @@ Apache-2.0`,
     modelType: 'llm',
     sizeGB: 16.8,
     downloads: 3120,
+    createdAt: now(),
     updatedAt: now(),
     readme: '# Llama 3.3 8B Instruct',
   },
@@ -86,6 +90,7 @@ Apache-2.0`,
     modelType: 'embedding',
     sizeGB: 1.3,
     downloads: 980,
+    createdAt: now(),
     updatedAt: now(),
     readme: '# BGE Large EN v1.5\n\nGeneral-purpose English embedding model.',
   },
@@ -100,6 +105,7 @@ Apache-2.0`,
     modelType: 'diffusion',
     sizeGB: 14.0,
     downloads: 1022,
+    createdAt: now(),
     updatedAt: now(),
     readme: '# Stable Diffusion 3 Medium',
   },
@@ -115,6 +121,7 @@ Apache-2.0`,
     modelType: 'llm',
     sizeGB: 0.25,
     downloads: 12,
+    createdAt: now(),
     updatedAt: now(),
     readme: '# Helpdesk LoRA adapter\n\nLoRA rank-64 adapter fine-tuned on internal helpdesk tickets.',
   },
@@ -130,6 +137,7 @@ Apache-2.0`,
     modelType: 'classifier',
     sizeGB: 0.4,
     downloads: 5,
+    createdAt: now(),
     updatedAt: now(),
     readme: '# Triage classifier\n\nDistilBERT-based classifier trained on 120k tickets.',
   },
@@ -149,6 +157,8 @@ function fillModelDefaults(m: ModelItem): ModelItem {
     tags: m.tags ?? [],
     downloads: m.downloads ?? 0,
     sizeGB: m.sizeGB ?? 0,
+    createdAt: m.createdAt ?? m.updatedAt ?? now(),
+    updatedAt: m.updatedAt ?? m.createdAt ?? now(),
     readme: m.readme ?? '',
   };
 }
@@ -179,7 +189,7 @@ export function reloadModels(scope: ModelScope, namespace?: string) {
   ensureModelsLoaded(scope, namespace);
 }
 
-export async function addModel(m: Omit<ModelItem, 'id' | 'updatedAt' | 'downloads'>): Promise<ModelItem> {
+export async function addModel(m: Omit<ModelItem, 'id' | 'createdAt' | 'updatedAt' | 'downloads'>): Promise<ModelItem> {
   if (apiEnabled) {
     const created = await api.createModel({
       name: m.name,
@@ -196,7 +206,8 @@ export async function addModel(m: Omit<ModelItem, 'id' | 'updatedAt' | 'download
     modelsStore.set(prev => [filled, ...prev]);
     return filled;
   }
-  const item: ModelItem = { ...m, id: uid('m'), updatedAt: now(), downloads: 0 };
+  const createdAt = now();
+  const item: ModelItem = { ...m, id: uid('m'), createdAt, updatedAt: createdAt, downloads: 0 };
   modelsStore.set(prev => [item, ...prev]);
   return item;
 }

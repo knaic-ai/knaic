@@ -124,7 +124,7 @@ func init() {
 	})
 	register(Kind{
 		Slug:       "llminferenceservices",
-		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha1", Resource: "llminferenceservices"},
+		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha2", Resource: "llminferenceservices"},
 		Namespaced: true,
 		Project:    projectLLMInferenceService,
 	})
@@ -139,6 +139,18 @@ func init() {
 		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha1", Resource: "clusterservingruntimes"},
 		Namespaced: false,
 		Project:    projectServingRuntime,
+	})
+	register(Kind{
+		Slug:       "clusterstoragecontainers",
+		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha1", Resource: "clusterstoragecontainers"},
+		Namespaced: false,
+		Project:    projectClusterStorageContainer,
+	})
+	register(Kind{
+		Slug:       "llminferenceserviceconfigs",
+		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha2", Resource: "llminferenceserviceconfigs"},
+		Namespaced: true,
+		Project:    projectLLMInferenceServiceConfig,
 	})
 	register(Kind{
 		Slug:       "notebooks",
