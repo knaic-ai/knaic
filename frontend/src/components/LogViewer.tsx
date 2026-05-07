@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal, Button, Space, Select, Tag } from 'antd';
 import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
 import { streamPodLogs } from '@/api/k8sres';
+import { streamInferenceServiceLogs } from '@/api/inference';
 import { apiEnabled } from '@/api/client';
 
 interface Props {
@@ -13,7 +14,10 @@ interface Props {
   /** When set, the viewer streams real pod logs from the backend. */
   podRef?: { namespace: string; name: string };
 
-  /** Fallback for prototype mode (no podRef). */
+  /** Streams logs for the pod backing an inference service. */
+  inferenceRef?: { namespace: string; name: string; kind: 'InferenceService' | 'LLMInferenceService' };
+
+  /** Fallback for prototype mode (no backend log source). */
   sampleLines?: (container: string) => string[];
 }
 
@@ -27,7 +31,7 @@ const defaultSample = (container: string) => [
   `[INFO ] ready`,
 ];
 
-export function LogViewer({ open, onClose, title, containers = ['main'], podRef, sampleLines }: Props) {
+export function LogViewer({ open, onClose, title, containers = ['main'], podRef, inferenceRef, sampleLines }: Props) {
   const [container, setContainer] = useState(containers[0]);
   const [lines, setLines] = useState<string[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -35,11 +39,11 @@ export function LogViewer({ open, onClose, title, containers = ['main'], podRef,
   const abortRef = useRef<AbortController | null>(null);
   const fakeTimer = useRef<number | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
-  const fallbackToFake = !podRef || !apiEnabled;
+  const fallbackToFake = (!podRef && !inferenceRef) || !apiEnabled;
 
   useEffect(() => {
     setContainer(containers[0]);
-  }, [containers, podRef?.name]);
+  }, [containers, podRef?.name, inferenceRef?.name]);
 
   useEffect(() => {
     if (!open) {
@@ -70,20 +74,33 @@ export function LogViewer({ open, onClose, title, containers = ['main'], podRef,
     const ac = new AbortController();
     abortRef.current = ac;
     setStreaming(true);
-    void streamPodLogs(podRef!.namespace, podRef!.name, {
+    const opts = {
       container,
       follow: true,
       tailLines: 200,
       signal: ac.signal,
-      onLine: line => setLines(prev => [...prev, line]),
+      onLine: (line: string) => setLines(prev => [...prev, line]),
       onEnd: () => setStreaming(false),
-      onError: e => {
+      onError: (e: Error) => {
         setErr(e.message);
         setStreaming(false);
       },
-    });
+    };
+    void (podRef
+      ? streamPodLogs(podRef.namespace, podRef.name, opts)
+      : streamInferenceServiceLogs(inferenceRef!.namespace, inferenceRef!.name, inferenceRef!.kind, opts));
     return () => ac.abort();
-  }, [open, container, podRef?.namespace, podRef?.name, fallbackToFake, sampleLines]);
+  }, [
+    open,
+    container,
+    podRef?.namespace,
+    podRef?.name,
+    inferenceRef?.namespace,
+    inferenceRef?.name,
+    inferenceRef?.kind,
+    fallbackToFake,
+    sampleLines,
+  ]);
 
   useEffect(() => {
     if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;

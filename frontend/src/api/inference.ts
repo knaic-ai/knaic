@@ -4,7 +4,7 @@
 // servingruntimes).
 
 import { request } from './client';
-import { listNamespaced } from './k8sres';
+import { listNamespaced, streamLogEndpoint, type LogStreamOptions } from './k8sres';
 import type { InferenceService, RuntimeSecurityContext, ServingRuntime } from '@/data/inference';
 
 export interface CreateServiceRequest {
@@ -101,4 +101,22 @@ export async function listInferenceServices(ns: string): Promise<InferenceServic
 
 export function listServingRuntimes(ns: string): Promise<ServingRuntime[]> {
   return listNamespaced<ServingRuntime>('servingruntimes', ns).catch(() => []);
+}
+
+export function streamInferenceServiceLogs(
+  ns: string,
+  name: string,
+  kind: InferenceService['kind'],
+  opts: LogStreamOptions,
+): Promise<void> {
+  const params = new URLSearchParams();
+  params.set('kind', kind);
+  if (opts.container) params.set('container', opts.container);
+  if (opts.follow) params.set('follow', 'true');
+  if (opts.tailLines !== undefined) params.set('tailLines', String(opts.tailLines));
+  if (opts.previous) params.set('previous', 'true');
+  return streamLogEndpoint(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(name)}/logs?${params}`,
+    opts,
+  );
 }

@@ -238,7 +238,7 @@ func (s *Service) gateWrite(ctx context.Context, u *auth.User, scope Scope, name
 // ParseScheme inspects a model URI and returns its scheme.
 func ParseScheme(uri string) (Scheme, error) {
 	switch {
-	case strings.HasPrefix(uri, "hf://"):
+	case strings.HasPrefix(uri, "hf://"), strings.HasPrefix(uri, "hf-mirror://"):
 		return SchemeHF, nil
 	case strings.HasPrefix(uri, "modelscope://"):
 		return SchemeModelScope, nil
@@ -247,7 +247,7 @@ func ParseScheme(uri string) (Scheme, error) {
 	case strings.HasPrefix(uri, "oci://"):
 		return SchemeOCI, nil
 	default:
-		return "", fmt.Errorf("unsupported URI scheme; use hf:// modelscope:// s3:// or oci://")
+		return "", fmt.Errorf("unsupported URI scheme; use hf:// hf-mirror:// modelscope:// s3:// or oci://")
 	}
 }
 

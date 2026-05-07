@@ -44,6 +44,16 @@ func TestPlatformAdminPrivateModelWriteStillWorksWithoutAuthorizer(t *testing.T)
 	}
 }
 
+func TestParseSchemeAcceptsHFMirrorURIAsHuggingFace(t *testing.T) {
+	scheme, err := ParseScheme("hf-mirror://Qwen/Qwen3.5-7B-Instruct")
+	if err != nil {
+		t.Fatalf("ParseScheme: %v", err)
+	}
+	if scheme != SchemeHF {
+		t.Fatalf("scheme = %q, want %q", scheme, SchemeHF)
+	}
+}
+
 func TestMemoryStoreListsByCreationTimeNewestFirst(t *testing.T) {
 	store := NewMemoryStore()
 	ctx := context.Background()

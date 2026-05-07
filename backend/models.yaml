@@ -11,7 +11,7 @@
 models:
   - name: Qwen/Qwen3.5-0.8B
     owner: Qwen
-    uri: hf://Qwen/Qwen3.5-0.8B
+    uri: hf-mirror://Qwen/Qwen3.5-0.8B
     scheme: hf
     tags: [text-generation, small]
     modelType: llm
@@ -24,7 +24,7 @@ models:
 
   - name: Qwen/Qwen3.5-7B-Instruct
     owner: Qwen
-    uri: hf://Qwen/Qwen3.5-7B-Instruct
+    uri: hf-mirror://Qwen/Qwen3.5-7B-Instruct
     scheme: hf
     tags: [chat, instruct, text-generation]
     modelType: llm
@@ -45,7 +45,7 @@ models:
 
   - name: Qwen/Qwen3.5-72B-Instruct
     owner: Qwen
-    uri: hf://Qwen/Qwen3.5-72B-Instruct
+    uri: hf-mirror://Qwen/Qwen3.5-72B-Instruct
     scheme: hf
     tags: [chat, instruct, flagship]
     modelType: llm
@@ -57,7 +57,7 @@ models:
 
   - name: meta-llama/Llama-3.3-8B-Instruct
     owner: meta-llama
-    uri: hf://meta-llama/Llama-3.3-8B-Instruct
+    uri: hf-mirror://meta-llama/Llama-3.3-8B-Instruct
     scheme: hf
     tags: [chat, instruct]
     modelType: llm
@@ -67,7 +67,7 @@ models:
 
   - name: BAAI/bge-large-en-v1.5
     owner: BAAI
-    uri: hf://BAAI/bge-large-en-v1.5
+    uri: hf-mirror://BAAI/bge-large-en-v1.5
     scheme: hf
     tags: [embedding, retrieval]
     modelType: embedding
@@ -79,7 +79,7 @@ models:
 
   - name: stabilityai/stable-diffusion-3-medium
     owner: stabilityai
-    uri: hf://stabilityai/stable-diffusion-3-medium
+    uri: hf-mirror://stabilityai/stable-diffusion-3-medium
     scheme: hf
     tags: [image, diffusion]
     modelType: diffusion

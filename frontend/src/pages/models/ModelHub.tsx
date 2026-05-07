@@ -359,7 +359,7 @@ export function ModelHub() {
           const v = await form.validateFields();
           const scheme = parseUri(v.uri);
           if (!scheme) {
-            message.error('Unsupported URI scheme. Use hf:// modelscope:// s3:// or oci://');
+            message.error('Unsupported URI scheme. Use hf:// hf-mirror:// modelscope:// s3:// or oci://');
             return;
           }
           try {
@@ -388,7 +388,7 @@ export function ModelHub() {
             <Input placeholder="my-org/my-model" />
           </Form.Item>
           <Form.Item name="uri" label="Storage URI" rules={[{ required: true }]}>
-            <Input placeholder="hf://Qwen/Qwen3.5-7B-Instruct or s3://bucket/path/" />
+            <Input placeholder="hf-mirror://Qwen/Qwen3.5-7B-Instruct or s3://bucket/path/" />
           </Form.Item>
           <Form.Item name="modelType" label="Type" initialValue="llm">
             <Select

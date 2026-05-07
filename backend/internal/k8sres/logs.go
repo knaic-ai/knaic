@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // LogOptions are the query parameters accepted by the /pods/{name}/logs
@@ -18,6 +23,84 @@ type LogOptions struct {
 	TailLines    int64
 	Previous     bool
 	SinceSeconds int64
+}
+
+// InferenceLogTarget is the pod chosen for an InferenceService-style log
+// request. The backend resolves this so the UI does not need to understand
+// KServe's controller-created pod names.
+type InferenceLogTarget struct {
+	Namespace  string
+	PodName    string
+	Containers []string
+}
+
+// ResolveInferenceLogTarget picks the best matching pod for an
+// InferenceService or LLMInferenceService. It prefers standard KServe labels,
+// then common app/owner/name fallbacks for installs with different labels.
+func (s *Service) ResolveInferenceLogTarget(ctx context.Context, namespace, name, kind string) (InferenceLogTarget, error) {
+	if s.typed == nil {
+		return InferenceLogTarget{}, fmt.Errorf("typed Kubernetes client not initialized")
+	}
+	list, err := s.typed.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return InferenceLogTarget{}, err
+	}
+
+	type candidate struct {
+		pod   corev1.Pod
+		score int
+	}
+	var candidates []candidate
+	for _, pod := range list.Items {
+		score := inferencePodScore(&pod, name, kind)
+		if score <= 0 {
+			continue
+		}
+		candidates = append(candidates, candidate{pod: pod, score: score})
+	}
+	if len(candidates) == 0 {
+		return InferenceLogTarget{}, apierrors.NewNotFound(
+			schema.GroupResource{Resource: "pods"},
+			fmt.Sprintf("for inference service %s/%s", namespace, name),
+		)
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.score != b.score {
+			return a.score > b.score
+		}
+		if podReady(&a.pod) != podReady(&b.pod) {
+			return podReady(&a.pod)
+		}
+		if (a.pod.Status.Phase == corev1.PodRunning) != (b.pod.Status.Phase == corev1.PodRunning) {
+			return a.pod.Status.Phase == corev1.PodRunning
+		}
+		if !a.pod.CreationTimestamp.Equal(&b.pod.CreationTimestamp) {
+			return a.pod.CreationTimestamp.After(b.pod.CreationTimestamp.Time)
+		}
+		return a.pod.Name < b.pod.Name
+	})
+
+	pod := candidates[0].pod
+	return InferenceLogTarget{
+		Namespace:  namespace,
+		PodName:    pod.Name,
+		Containers: podContainerNames(&pod),
+	}, nil
+}
+
+// StreamInferenceServiceLogs resolves the controller-created serving pod and
+// streams that pod's logs using the normal Kubernetes pods/log API.
+func (s *Service) StreamInferenceServiceLogs(ctx context.Context, w http.ResponseWriter, namespace, name, kind string, opts LogOptions) error {
+	target, err := s.ResolveInferenceLogTarget(ctx, namespace, name, kind)
+	if err != nil {
+		return err
+	}
+	if opts.Container == "" {
+		opts.Container = preferredInferenceContainer(target.Containers)
+	}
+	return s.StreamPodLogs(ctx, w, target.Namespace, target.PodName, opts)
 }
 
 // StreamPodLogs writes a Server-Sent-Events stream of pod logs to w.
@@ -100,4 +183,106 @@ func sseEscape(s string) string {
 		out = append(out, c)
 	}
 	return string(out)
+}
+
+func inferencePodScore(pod *corev1.Pod, name, kind string) int {
+	labels := pod.GetLabels()
+	score := 0
+	bump := func(v int) {
+		if v > score {
+			score = v
+		}
+	}
+
+	if kind == "LLMInferenceService" {
+		if labels["serving.kserve.io/llminferenceservice"] == name {
+			bump(120)
+		}
+		if labels["kserve.io/llminferenceservice"] == name {
+			bump(115)
+		}
+	}
+	if kind == "InferenceService" || kind == "" {
+		if labels["serving.kserve.io/inferenceservice"] == name {
+			bump(120)
+		}
+		if labels["kserve.io/inferenceservice"] == name {
+			bump(115)
+		}
+	}
+
+	// Accept both label families as fallbacks even when the caller passes the
+	// wrong kind; the service name still scopes the lookup to this namespace.
+	if labels["serving.kserve.io/inferenceservice"] == name || labels["serving.kserve.io/llminferenceservice"] == name {
+		bump(100)
+	}
+	if labels["app.kubernetes.io/instance"] == name || labels["app.kubernetes.io/name"] == name {
+		bump(80)
+	}
+	if labels["app"] == name {
+		bump(70)
+	}
+	for _, owner := range pod.OwnerReferences {
+		if owner.Name == name || strings.HasPrefix(owner.Name, name+"-") {
+			bump(55)
+		}
+	}
+	if pod.Name == name || strings.HasPrefix(pod.Name, name+"-") {
+		bump(45)
+	}
+
+	if score == 0 {
+		return 0
+	}
+	if labels["serving.kserve.io/component"] == "predictor" || labels["component"] == "predictor" {
+		score += 10
+	}
+	if pod.Status.Phase == corev1.PodRunning {
+		score += 20
+	}
+	if podReady(pod) {
+		score += 30
+	}
+	return score
+}
+
+func podReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func podContainerNames(pod *corev1.Pod) []string {
+	names := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		if c.Name != "" {
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
+
+func preferredInferenceContainer(containers []string) string {
+	for _, preferred := range []string{"kserve-container", "main", "model-server", "worker"} {
+		for _, c := range containers {
+			if c == preferred {
+				return c
+			}
+		}
+	}
+	for _, c := range containers {
+		switch c {
+		case "queue-proxy", "istio-proxy", "storage-initializer":
+			continue
+		default:
+			return c
+		}
+	}
+	if len(containers) > 0 {
+		return containers[0]
+	}
+	return ""
 }

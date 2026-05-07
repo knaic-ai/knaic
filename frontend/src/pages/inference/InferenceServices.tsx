@@ -297,6 +297,7 @@ export function InferenceServicesPage() {
         onClose={() => setLog(null)}
         title={`Logs · ${log?.name ?? ''}`}
         containers={['kserve-container', 'queue-proxy']}
+        inferenceRef={log ? { namespace: log.namespace, name: log.name, kind: log.kind } : undefined}
       />
     </div>
   );

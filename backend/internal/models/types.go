@@ -41,7 +41,7 @@ type Model struct {
 	Readme    string    `json:"readme"`
 }
 
-// CreateRequest registers a model from a raw storage URI (hf/ms/s3/oci).
+// CreateRequest registers a model from a raw storage URI (hf/hf-mirror/ms/s3/oci).
 type CreateRequest struct {
 	Name      string   `json:"name"`
 	Owner     string   `json:"owner,omitempty"` // server fills from caller if empty

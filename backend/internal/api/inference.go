@@ -1,11 +1,14 @@
 package api
 
 import (
+	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/alauda/knaic-backend/internal/inference"
+	"github.com/alauda/knaic-backend/internal/k8sres"
 )
 
 type inferenceAPI struct {
@@ -21,6 +24,7 @@ func (a *inferenceAPI) routes(r chi.Router) {
 	r.Post("/services", a.createService)
 	r.Post("/runtimes", a.createRuntime)
 	r.Put("/runtimes/{name}", a.updateRuntime)
+	r.Get("/services/{name}/logs", a.logs)
 	r.Post("/services/{name}/stop", a.stop)
 	r.Post("/services/{name}/start", a.start)
 }
@@ -66,6 +70,37 @@ func (a *inferenceAPI) updateRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, obj.Object)
+}
+
+func (a *inferenceAPI) logs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	opts := k8sres.LogOptions{
+		Container: q.Get("container"),
+		Follow:    q.Get("follow") == "true",
+		Previous:  q.Get("previous") == "true",
+	}
+	if v, err := strconv.ParseInt(q.Get("tailLines"), 10, 64); err == nil && v > 0 {
+		opts.TailLines = v
+	}
+	if v, err := strconv.ParseInt(q.Get("sinceSeconds"), 10, 64); err == nil && v > 0 {
+		opts.SinceSeconds = v
+	}
+	svc, err := a.logService(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	err = svc.StreamInferenceServiceLogs(
+		r.Context(),
+		w,
+		chi.URLParam(r, "namespace"),
+		chi.URLParam(r, "name"),
+		q.Get("kind"),
+		opts,
+	)
+	if err != nil && !errors.Is(err, http.ErrAbortHandler) {
+		writeK8sError(w, err)
+	}
 }
 
 func (a *inferenceAPI) toggleStopped(w http.ResponseWriter, r *http.Request, stopped bool) {
@@ -133,4 +168,12 @@ func (a *inferenceAPI) service(r *http.Request) (*inference.Service, error) {
 		return nil, err
 	}
 	return inference.New(clients.Typed, clients.Dynamic, clients.Discovery), nil
+}
+
+func (a *inferenceAPI) logService(r *http.Request) (*k8sres.Service, error) {
+	clients, err := a.source.clientsForRequest(r)
+	if err != nil {
+		return nil, err
+	}
+	return k8sres.NewService(clients.Dynamic, clients.Typed), nil
 }

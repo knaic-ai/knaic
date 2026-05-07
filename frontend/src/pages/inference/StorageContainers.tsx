@@ -121,7 +121,7 @@ export function StorageContainersPage() {
     <div className="knaic-page">
       <PageHeader
         title="Storage Initializers"
-        description="ClusterStorageContainer resources tell KServe how to download model artifacts from each URI scheme (s3://, hf://, oci://, …). Cluster-scoped."
+        description="ClusterStorageContainer resources tell KServe how to download model artifacts from each URI scheme (s3://, hf://, hf-mirror://, oci://, …). Cluster-scoped."
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={() => void reload()}>Refresh</Button>

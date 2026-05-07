@@ -182,19 +182,14 @@ export interface LogStreamOptions {
   onError?: (err: Error) => void;
 }
 
-export async function streamPodLogs(ns: string, name: string, opts: LogStreamOptions): Promise<void> {
+export async function streamLogEndpoint(path: string, opts: LogStreamOptions): Promise<void> {
   if (!apiEnabled) {
     opts.onError?.(new Error('API not configured — cannot stream logs'));
     return;
   }
-  const params = new URLSearchParams();
-  if (opts.container) params.set('container', opts.container);
-  if (opts.follow) params.set('follow', 'true');
-  if (opts.tailLines !== undefined) params.set('tailLines', String(opts.tailLines));
-  if (opts.previous) params.set('previous', 'true');
   try {
     const res = await fetchWithAuth(
-      `/api/v1/namespaces/${encodeURIComponent(ns)}/pods/${encodeURIComponent(name)}/logs?${params}`,
+      path,
       {
         headers: { Accept: 'text/event-stream' },
         signal: opts.signal,
@@ -230,4 +225,16 @@ export async function streamPodLogs(ns: string, name: string, opts: LogStreamOpt
     if ((e as Error).name === 'AbortError') return;
     opts.onError?.(e as Error);
   }
+}
+
+export async function streamPodLogs(ns: string, name: string, opts: LogStreamOptions): Promise<void> {
+  const params = new URLSearchParams();
+  if (opts.container) params.set('container', opts.container);
+  if (opts.follow) params.set('follow', 'true');
+  if (opts.tailLines !== undefined) params.set('tailLines', String(opts.tailLines));
+  if (opts.previous) params.set('previous', 'true');
+  return streamLogEndpoint(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/pods/${encodeURIComponent(name)}/logs?${params}`,
+    opts,
+  );
 }
