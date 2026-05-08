@@ -22,11 +22,36 @@ func newInferenceAPI(svc *inference.Service, source k8sClientSource) *inferenceA
 
 func (a *inferenceAPI) routes(r chi.Router) {
 	r.Post("/services", a.createService)
+	r.Put("/services/{name}", a.updateService)
 	r.Post("/runtimes", a.createRuntime)
 	r.Put("/runtimes/{name}", a.updateRuntime)
 	r.Get("/services/{name}/logs", a.logs)
+	r.Get("/services/{name}/pods", a.pods)
 	r.Post("/services/{name}/stop", a.stop)
 	r.Post("/services/{name}/start", a.start)
+}
+
+// pods lists all pods backing an InferenceService / LLMInferenceService —
+// the log viewer's pod picker uses this so users can read logs from old
+// replicas during a rolling update or from init containers that have
+// completed.
+func (a *inferenceAPI) pods(w http.ResponseWriter, r *http.Request) {
+	svc, err := a.logService(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	pods, err := svc.ListInferencePods(
+		r.Context(),
+		chi.URLParam(r, "namespace"),
+		chi.URLParam(r, "name"),
+		r.URL.Query().Get("kind"),
+	)
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pods)
 }
 
 // LLMConfigsHandler is a top-level (non-namespaced) endpoint that lists
@@ -65,6 +90,25 @@ func (a *inferenceAPI) updateRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	obj, err := svc.UpdateRuntime(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), req)
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, obj.Object)
+}
+
+func (a *inferenceAPI) updateService(w http.ResponseWriter, r *http.Request) {
+	var req inference.CreateServiceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	obj, err := svc.UpdateService(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), req)
 	if err != nil {
 		writeK8sError(w, err)
 		return

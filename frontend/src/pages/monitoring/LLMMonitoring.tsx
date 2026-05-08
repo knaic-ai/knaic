@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Select, Space, Tag, Statistic, Empty } from 'antd';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area,
 } from 'recharts';
 import { PageHeader } from '@/components/PageHeader';
 import { useApp } from '@/context/AppContext';
-import { useInferenceServices } from '@/data/inference';
+import { ensureInferenceServicesLoaded, useInferenceServices } from '@/data/inference';
 
 interface LLMPoint {
   t: string;
@@ -55,15 +55,44 @@ function buildLLMSeries(serviceId: string, points = 36): LLMPoint[] {
   return data;
 }
 
+const kindLabel: Record<'LLMInferenceService' | 'InferenceService', string> = {
+  LLMInferenceService: 'LLM',
+  InferenceService: 'Classic',
+};
+
+const kindColor: Record<'LLMInferenceService' | 'InferenceService', string> = {
+  LLMInferenceService: 'blue',
+  InferenceService: 'purple',
+};
+
 export function LLMMonitoring() {
   const { namespace } = useApp();
   const services = useInferenceServices();
-  const llmServices = useMemo(
-    () => services.filter(s => s.namespace === namespace && s.kind === 'LLMInferenceService'),
+
+  useEffect(() => {
+    ensureInferenceServicesLoaded(namespace);
+  }, [namespace]);
+
+  // Both kinds expose tokens / latency / RPS through the same Prometheus
+  // metrics (the LLM-d exporter and KServe v1beta1's predictor both publish
+  // OpenTelemetry-style histograms), so the same dashboard works for both.
+  const inferenceServices = useMemo(
+    () => services.filter(s => s.namespace === namespace),
     [services, namespace],
   );
-  const [selectedId, setSelectedId] = useState<string | undefined>(llmServices[0]?.id);
-  const selected = llmServices.find(s => s.id === selectedId) ?? llmServices[0];
+  const [selectedId, setSelectedId] = useState<string | undefined>(inferenceServices[0]?.id);
+  // Reset the selection when the namespace flips so we don't keep pointing
+  // at a service that's no longer in the filtered list.
+  useEffect(() => {
+    if (inferenceServices.length === 0) {
+      setSelectedId(undefined);
+      return;
+    }
+    if (!inferenceServices.some(s => s.id === selectedId)) {
+      setSelectedId(inferenceServices[0].id);
+    }
+  }, [inferenceServices, selectedId]);
+  const selected = inferenceServices.find(s => s.id === selectedId) ?? inferenceServices[0];
   const series = useMemo(() => (selected ? buildLLMSeries(selected.id) : []), [selected]);
 
   const last = series[series.length - 1];
@@ -72,14 +101,14 @@ export function LLMMonitoring() {
       ? +(series.reduce((s, p) => s + (p[key] as number), 0) / series.length).toFixed(1)
       : 0;
 
-  if (llmServices.length === 0) {
+  if (inferenceServices.length === 0) {
     return (
       <div className="knaic-page">
         <PageHeader
-          title="LLM service monitoring"
-          description="Tokens/s, token usage, RPS, and latency for LLMInferenceService."
+          title="Inference service monitoring"
+          description="Tokens/s, token usage, RPS, and latency for InferenceService and LLMInferenceService."
         />
-        <Empty description={`No LLMInferenceService in namespace ${namespace}.`} />
+        <Empty description={`No InferenceService or LLMInferenceService in namespace ${namespace}.`} />
       </div>
     );
   }
@@ -87,22 +116,37 @@ export function LLMMonitoring() {
   return (
     <div className="knaic-page">
       <PageHeader
-        title="LLM service monitoring"
-        description="Tokens/s, token usage, RPS, and latency pulled from the LLM-d Prometheus exporter."
+        title="Inference service monitoring"
+        description="Tokens/s, token usage, RPS, and latency pulled from the LLM-d / KServe Prometheus exporters. Works for both InferenceService and LLMInferenceService."
       />
       <Card size="small" style={{ marginBottom: 12 }}>
         <Space wrap size={12}>
-          <span className="knaic-sub">LLMInferenceService:</span>
+          <span className="knaic-sub">Service:</span>
           <Select
             value={selected?.id}
             onChange={setSelectedId}
-            style={{ minWidth: 320 }}
-            options={llmServices.map(s => ({
-              label: `${s.name} · ${s.runtime}`,
+            style={{ minWidth: 360 }}
+            options={inferenceServices.map(s => ({
+              // Tag the option label so the user can tell the two kinds apart
+              // at a glance — the same name might exist in both flavours.
+              label: (
+                <Space size={6}>
+                  <span>{s.name}</span>
+                  <Tag color={kindColor[s.kind]} style={{ marginRight: 0 }}>
+                    {kindLabel[s.kind]}
+                  </Tag>
+                  <span className="knaic-sub">· {s.runtime}</span>
+                </Space>
+              ),
               value: s.id,
             }))}
           />
-          <Tag color="blue">{selected?.modelUri}</Tag>
+          {selected && (
+            <Tag color={kindColor[selected.kind]}>
+              {selected.kind}
+            </Tag>
+          )}
+          <Tag color="default">{selected?.modelUri}</Tag>
           <Tag>Step 5m · last 3h</Tag>
         </Space>
       </Card>

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alauda/knaic-backend/internal/auth"
 )
 
 func TestPromQLAddsNamespaceTargetForUsage(t *testing.T) {
@@ -71,5 +73,95 @@ func TestQueryRangeParsesPrometheusMatrix(t *testing.T) {
 	}
 	if len(series.Points) != 2 || series.Points[1].Value != 2.25 {
 		t.Fatalf("unexpected points: %#v", series.Points)
+	}
+}
+
+// fakeUpstream records the Authorization header from each request and
+// returns an empty Prometheus matrix.
+func fakeUpstream() (*httptest.Server, *string) {
+	captured := new(string)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*captured = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	return server, captured
+}
+
+func makeReq() QueryRequest {
+	return QueryRequest{
+		Scope:    ScopeCluster,
+		Target:   "cluster",
+		Resource: ResourceCPU,
+		Kind:     KindUsage,
+		Start:    time.Unix(1714280000, 0),
+		End:      time.Unix(1714280300, 0),
+		Step:     5 * time.Minute,
+	}
+}
+
+// Default = no auth — knaic must not invent an Authorization header when
+// the upstream is open (e.g. in-cluster Prometheus).
+func TestQueryRangeAuthNoneOmitsHeader(t *testing.T) {
+	server, captured := fakeUpstream()
+	defer server.Close()
+	svc := NewService(server.URL, server.Client())
+	if _, err := svc.QueryRange(context.Background(), makeReq()); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if *captured != "" {
+		t.Fatalf("Authorization should be empty, got %q", *captured)
+	}
+}
+
+// AuthForwardOIDC reads the bearer that auth.Verifier.Middleware stashed in
+// the request context and forwards it to the upstream — that's how the
+// query reaches an oauth2-proxy-fronted vmselect.
+func TestQueryRangeAuthForwardOIDC(t *testing.T) {
+	server, captured := fakeUpstream()
+	defer server.Close()
+	svc := NewServiceWithOptions(server.URL, server.Client(), Options{AuthMode: AuthForwardOIDC})
+	ctx := auth.WithBearer(context.Background(), "user-jwt-abc")
+	if _, err := svc.QueryRange(ctx, makeReq()); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if *captured != "Bearer user-jwt-abc" {
+		t.Fatalf("Authorization = %q, want Bearer user-jwt-abc", *captured)
+	}
+}
+
+// When AuthForwardOIDC is configured but the caller didn't supply a token
+// (e.g. background sweep, non-authenticated route), the static fallback
+// kicks in so the upstream call still authenticates.
+func TestQueryRangeAuthForwardOIDCFallsBackToStatic(t *testing.T) {
+	server, captured := fakeUpstream()
+	defer server.Close()
+	svc := NewServiceWithOptions(server.URL, server.Client(), Options{
+		AuthMode:     AuthForwardOIDC,
+		StaticBearer: "fallback-sa-token",
+	})
+	if _, err := svc.QueryRange(context.Background(), makeReq()); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if *captured != "Bearer fallback-sa-token" {
+		t.Fatalf("Authorization = %q, want Bearer fallback-sa-token", *captured)
+	}
+}
+
+// AuthStaticBearer always sends the configured token, even when the caller
+// has their own — used for service-account-style upstreams.
+func TestQueryRangeAuthStaticBearerIgnoresCallerToken(t *testing.T) {
+	server, captured := fakeUpstream()
+	defer server.Close()
+	svc := NewServiceWithOptions(server.URL, server.Client(), Options{
+		AuthMode:     AuthStaticBearer,
+		StaticBearer: "fixed-sa-token",
+	})
+	ctx := auth.WithBearer(context.Background(), "user-jwt-abc")
+	if _, err := svc.QueryRange(ctx, makeReq()); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if *captured != "Bearer fixed-sa-token" {
+		t.Fatalf("Authorization = %q, want Bearer fixed-sa-token", *captured)
 	}
 }

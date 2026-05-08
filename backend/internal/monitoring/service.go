@@ -12,22 +12,60 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/alauda/knaic-backend/internal/auth"
+)
+
+// AuthMode controls how the monitoring proxy authenticates against the
+// upstream Prometheus / VictoriaMetrics endpoint.
+//
+//   - AuthNone (default): no Authorization header, suitable for endpoints
+//     that don't gate access (in-cluster Prometheus, vmselect without an
+//     auth-proxy sidecar, etc.).
+//   - AuthForwardOIDC: forward the verified Dex bearer token captured by
+//     auth.Verifier.Middleware. Use when the upstream is fronted by an
+//     oauth2-proxy that shares the same OIDC issuer as knaic — the proxy
+//     accepts the JWT via `--skip-jwt-bearer-tokens`. This makes each query
+//     run with the calling user's identity, so VM tenant ACLs apply.
+//   - AuthStaticBearer: send a fixed bearer string (StaticBearer field).
+//     Useful when the upstream uses a service-account token unrelated to the
+//     end user.
+type AuthMode string
+
+const (
+	AuthNone          AuthMode = ""
+	AuthForwardOIDC   AuthMode = "forward"
+	AuthStaticBearer  AuthMode = "bearer"
 )
 
 type Service struct {
-	baseURL string
-	client  *http.Client
-	now     func() time.Time
+	baseURL       string
+	client        *http.Client
+	now           func() time.Time
+	authMode      AuthMode
+	staticBearer  string
+}
+
+// Options bundles optional construction settings. Pass {} for defaults.
+type Options struct {
+	AuthMode     AuthMode
+	StaticBearer string
 }
 
 func NewService(baseURL string, client *http.Client) *Service {
+	return NewServiceWithOptions(baseURL, client, Options{})
+}
+
+func NewServiceWithOptions(baseURL string, client *http.Client, opts Options) *Service {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	return &Service{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  client,
-		now:     func() time.Time { return time.Now().UTC() },
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		client:       client,
+		now:          func() time.Time { return time.Now().UTC() },
+		authMode:     opts.AuthMode,
+		staticBearer: opts.StaticBearer,
 	}
 }
 
@@ -65,6 +103,9 @@ func (s *Service) QueryRange(ctx context.Context, req QueryRequest) (Series, err
 	if err != nil {
 		return Series{}, err
 	}
+	if tok := s.bearerFor(ctx); tok != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+tok)
+	}
 	res, err := s.client.Do(httpReq)
 	if err != nil {
 		return Series{}, err
@@ -78,6 +119,134 @@ func (s *Service) QueryRange(ctx context.Context, req QueryRequest) (Series, err
 		return Series{}, err
 	}
 	return Series{Points: points, Unit: unit, Source: SourcePrometheus, Query: query}, nil
+}
+
+// DeviceUsageRequest selects the time range for a per-GPU usage probe.
+type DeviceUsageRequest struct {
+	Start int64 // unix seconds; 0 = now-1h
+	End   int64 // unix seconds; 0 = now
+	Step  int64 // seconds;       0 = 60s
+}
+
+// DeviceUsage is one GPU device's utilisation over time. Sourced from DCGM
+// when present; falls back to an empty list on clusters without DCGM.
+type DeviceUsage struct {
+	Node     string  `json:"node"`
+	GPU      string  `json:"gpu"`            // local index per host (0, 1, …)
+	UUID     string  `json:"uuid,omitempty"` // GPU UUID, when reported
+	ModelName string `json:"modelName,omitempty"`
+	Points   []Point `json:"points"`
+}
+
+// RawDeviceUsage runs a DCGM range query through the configured upstream
+// (Prometheus / VictoriaMetrics) and groups the result into one entry per
+// physical GPU. Returns an empty slice — not an error — when the upstream
+// is unset (dev mode) or DCGM isn't installed.
+func (s *Service) RawDeviceUsage(ctx context.Context, req DeviceUsageRequest) ([]DeviceUsage, error) {
+	if s.baseURL == "" {
+		return []DeviceUsage{}, nil
+	}
+	end := time.Unix(req.End, 0)
+	if req.End == 0 {
+		end = s.now()
+	}
+	start := time.Unix(req.Start, 0)
+	if req.Start == 0 {
+		start = end.Add(-1 * time.Hour)
+	}
+	step := time.Duration(req.Step) * time.Second
+	if step == 0 {
+		step = 60 * time.Second
+	}
+
+	// avg by () groups the per-pod / per-container series down to one
+	// time-series per (Hostname, gpu, UUID) — i.e. one per physical card.
+	q := `avg by (Hostname, gpu, UUID, modelName) (DCGM_FI_DEV_GPU_UTIL)`
+	u, err := url.Parse(s.baseURL + "/api/v1/query_range")
+	if err != nil {
+		return nil, err
+	}
+	qp := u.Query()
+	qp.Set("query", q)
+	qp.Set("start", strconv.FormatInt(start.Unix(), 10))
+	qp.Set("end", strconv.FormatInt(end.Unix(), 10))
+	qp.Set("step", strconv.FormatInt(int64(step.Seconds()), 10))
+	u.RawQuery = qp.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if tok := s.bearerFor(ctx); tok != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+tok)
+	}
+	res, err := s.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return []DeviceUsage{}, nil
+	}
+	var body struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+				Values [][]any           `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	out := make([]DeviceUsage, 0, len(body.Data.Result))
+	for _, r := range body.Data.Result {
+		entry := DeviceUsage{
+			Node:      r.Metric["Hostname"],
+			GPU:       r.Metric["gpu"],
+			UUID:      r.Metric["UUID"],
+			ModelName: r.Metric["modelName"],
+		}
+		for _, v := range r.Values {
+			if len(v) != 2 {
+				continue
+			}
+			ts, _ := v[0].(float64)
+			val, _ := v[1].(string)
+			f, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				continue
+			}
+			entry.Points = append(entry.Points, Point{
+				Time:  time.Unix(int64(ts), 0).UTC().Format("15:04"),
+				Value: f,
+			})
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// bearerFor selects the Authorization token for an upstream request based
+// on the configured AuthMode:
+//
+//   - AuthForwardOIDC reads the per-request bearer captured by
+//     auth.Verifier.Middleware from ctx; falls back to the static bearer if
+//     the caller has none (e.g. during background jobs).
+//   - AuthStaticBearer always sends the configured static value.
+//   - AuthNone returns "".
+func (s *Service) bearerFor(ctx context.Context) string {
+	switch s.authMode {
+	case AuthForwardOIDC:
+		if tok := auth.BearerFromContext(ctx); tok != "" {
+			return tok
+		}
+		return s.staticBearer
+	case AuthStaticBearer:
+		return s.staticBearer
+	}
+	return ""
 }
 
 func PromQL(req QueryRequest) (string, string, error) {

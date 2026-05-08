@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/alauda/knaic-backend/internal/charts"
 	"github.com/alauda/knaic-backend/internal/components"
 	"github.com/alauda/knaic-backend/internal/config"
+	"github.com/alauda/knaic-backend/internal/gpu"
 	"github.com/alauda/knaic-backend/internal/inference"
 	"github.com/alauda/knaic-backend/internal/k8s"
 	"github.com/alauda/knaic-backend/internal/k8sres"
@@ -28,6 +32,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "agent-mcp" {
+		if err := playground.RunMCPServerFromEnv(context.Background(), os.Stdin, os.Stdout); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	log := logx.New()
 
 	cfg, err := config.Load()
@@ -95,12 +107,14 @@ func main() {
 	var infSvc *inference.Service
 	var nbSvc *notebook.Service
 	var trainSvc *training.Service
+	var gpuSvc *gpu.Service
 	if clients != nil {
 		resSvc = k8sres.NewService(clients.Dynamic, clients.Typed)
 		adminSvc = admin.NewService(clients.Typed)
 		infSvc = inference.New(clients.Typed, clients.Dynamic, clients.Discovery)
 		nbSvc = notebook.New(clients.Dynamic, clients.Typed)
 		trainSvc = training.New(clients.Dynamic, training.NewREST())
+		gpuSvc = gpu.New(clients.Typed)
 	}
 	if adminSvc == nil {
 		adminSvc = admin.NewService(nil)
@@ -129,28 +143,61 @@ func main() {
 		modelAuthorizer = k8s.NewAuthorizer(clients, cfg.OIDCUsernameClaim, cfg.OIDCUsernamePrefix, cfg.AuthDisabled)
 	}
 	modelSvc := models.NewServiceWithAuthorizer(modelStore, modelAuthorizer)
-	monitoringSvc := monitoring.NewService(cfg.PrometheusURL, nil)
-	playgroundSvc := playground.NewService()
+	monitoringSvc := monitoring.NewServiceWithOptions(cfg.PrometheusURL, nil, monitoring.Options{
+		AuthMode:     monitoring.AuthMode(cfg.PrometheusAuth),
+		StaticBearer: cfg.PrometheusBearer,
+	})
+
+	var agentStore playground.AgentStore
+	if cfg.DatabaseURL != "" {
+		pgAgent, err := playground.NewPostgresAgentStore(ctx, cfg.DatabaseURL)
+		if err != nil {
+			log.Error("agent postgres init", "err", err)
+			os.Exit(1)
+		}
+		defer pgAgent.Close()
+		agentStore = pgAgent
+		log.Info("playground agent: postgres backend", "dsn", redactDSN(cfg.DatabaseURL))
+	} else {
+		agentStore = playground.NewMemoryAgentStore()
+		log.Warn("playground agent: in-memory session backend (data resets on restart). Set KNAIC_DB_URL for persistence.")
+	}
+	mcpCommand := []string{os.Args[0], "agent-mcp"}
+	if exe, err := os.Executable(); err == nil {
+		mcpCommand = []string{exe, "agent-mcp"}
+	}
+	agentAPIBaseURL := resolveAgentAPIBaseURL(cfg)
+	playgroundSvc := playground.NewServiceWithAgentStore(
+		agentStore,
+		playground.NewOpenCodeRunner(playground.OpenCodeOptions{
+			Binary:     cfg.OpenCodeBin,
+			WorkDir:    cfg.AgentWorkDir,
+			APIBaseURL: agentAPIBaseURL,
+			MCPCommand: mcpCommand,
+		}),
+	)
 
 	router := api.NewRouter(api.Deps{
-		Verifier:     verifier,
-		AuthProxy:    authProxy,
-		AuthConfig:   api.AuthConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, Scopes: cfg.OIDCScopes, RedirectURI: cfg.OIDCRedirectURI},
-		AuthDisabled: cfg.AuthDisabled,
-		K8s:          clients,
-		UserClaim:    cfg.OIDCUsernameClaim,
-		UserPrefix:   cfg.OIDCUsernamePrefix,
-		Components:   compSvc,
-		Registry:     regStore,
-		K8sRes:       resSvc,
-		Admin:        adminSvc,
-		Inference:    infSvc,
-		Notebook:     nbSvc,
-		Models:       modelSvc,
-		Training:     trainSvc,
-		Monitoring:   monitoringSvc,
-		Playground:   playgroundSvc,
-		CORSOrigins:  cfg.CORSOrigins,
+		Verifier:        verifier,
+		AuthProxy:       authProxy,
+		AuthConfig:      api.AuthConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID, Scopes: cfg.OIDCScopes, RedirectURI: cfg.OIDCRedirectURI},
+		AuthDisabled:    cfg.AuthDisabled,
+		K8s:             clients,
+		UserClaim:       cfg.OIDCUsernameClaim,
+		UserPrefix:      cfg.OIDCUsernamePrefix,
+		Components:      compSvc,
+		GPU:             gpuSvc,
+		Registry:        regStore,
+		K8sRes:          resSvc,
+		Admin:           adminSvc,
+		Inference:       infSvc,
+		Notebook:        nbSvc,
+		Models:          modelSvc,
+		Training:        trainSvc,
+		Monitoring:      monitoringSvc,
+		Playground:      playgroundSvc,
+		AgentAPIBaseURL: agentAPIBaseURL,
+		CORSOrigins:     cfg.CORSOrigins,
 	})
 
 	srv := &http.Server{
@@ -174,4 +221,28 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
 	}
+}
+
+func resolveAgentAPIBaseURL(cfg *config.Config) string {
+	if base := strings.TrimSpace(cfg.AgentAPIBaseURL); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	addr := strings.TrimSpace(cfg.Addr)
+	if addr == "" {
+		return ""
+	}
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		return strings.TrimRight(addr, "/")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			return "http://127.0.0.1" + addr
+		}
+		return "http://" + strings.TrimRight(addr, "/")
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }

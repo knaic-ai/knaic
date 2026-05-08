@@ -87,6 +87,7 @@ export function InferenceServicesPage() {
   const all = useInferenceServices();
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<InferenceService | null>(null);
   const [yaml, setYaml] = useState<{ svc: InferenceService; text: string } | null>(null);
   const [yamlEdit, setYamlEdit] = useState<{ svc: InferenceService; text: string } | null>(null);
   const [yamlLoading, setYamlLoading] = useState<string | null>(null);
@@ -148,7 +149,10 @@ export function InferenceServicesPage() {
             <Button
               type="primary"
               icon={<PlusOutlined />}
-              onClick={() => setOpen(true)}
+              onClick={() => {
+                setEditing(null);
+                setOpen(true);
+              }}
             >
               New inference service
             </Button>
@@ -236,11 +240,15 @@ export function InferenceServicesPage() {
                     trigger={['click']}
                     menu={{
                       items: [
+                        { key: 'edit', label: 'Edit', icon: <EditOutlined /> },
                         { key: 'edit-yaml', label: 'Edit YAML', icon: <EditOutlined /> },
                         { key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true },
                       ],
                       onClick: ({ key }) => {
-                        if (key === 'edit-yaml') {
+                        if (key === 'edit') {
+                          setEditing(r);
+                          setOpen(true);
+                        } else if (key === 'edit-yaml') {
                           openEditYaml(r);
                         } else if (key === 'delete') {
                           modal.confirm({
@@ -274,7 +282,11 @@ export function InferenceServicesPage() {
       <NewInferenceServiceModal
         open={open}
         namespace={namespace}
-        onClose={() => setOpen(false)}
+        editing={editing}
+        onClose={() => {
+          setOpen(false);
+          setEditing(null);
+        }}
       />
 
       <YamlViewer

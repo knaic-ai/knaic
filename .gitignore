@@ -1,4 +1,5 @@
 # Top-level safety net — each subproject also has its own .gitignore.
+sample-storage-initializer-hf.yaml
 node_modules/
 dist/
 bin/

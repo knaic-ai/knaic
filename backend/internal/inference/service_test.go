@@ -8,9 +8,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	discoveryfake "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clientgofake "k8s.io/client-go/kubernetes/fake"
-	discoveryfake "k8s.io/client-go/discovery/fake"
 	clientgotesting "k8s.io/client-go/testing"
 )
 
@@ -482,6 +482,149 @@ func TestUpdateRuntimePreservesIdentity(t *testing.T) {
 	c := containers[0].(map[string]any)
 	if img, _, _ := unstructured.NestedString(c, "image"); img != "vllm/vllm-openai:v0.8.0" {
 		t.Fatalf("spec.containers[0].image = %q, want bumped value", img)
+	}
+}
+
+func TestUpdateInferenceServicePreservesIdentityAndRewritesSpec(t *testing.T) {
+	svc := newTestService()
+	if _, err := svc.CreateService(context.Background(), "team-ml", CreateServiceRequest{
+		Name:          "qwen-classic",
+		Kind:          "InferenceService",
+		Runtime:       "vllm",
+		ModelURI:      "hf://Qwen/Qwen3.5-7B",
+		Replicas:      1,
+		CPURequest:    "1",
+		MemoryRequest: "2Gi",
+	}); err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	cur, err := svc.dyn.Resource(gvrInferenceService).Namespace("team-ml").Get(context.Background(), "qwen-classic", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cur.SetUID("uid-service")
+	cur.SetResourceVersion("123")
+	cur.SetAnnotations(map[string]string{"external.example.com/kept": "yes"})
+	cur.SetLabels(map[string]string{"app.kubernetes.io/instance": "external"})
+	if _, err := svc.dyn.Resource(gvrInferenceService).Namespace("team-ml").Update(context.Background(), cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("seed update: %v", err)
+	}
+
+	updated, err := svc.UpdateService(context.Background(), "team-ml", "qwen-classic", CreateServiceRequest{
+		Name:           "ignored-form-name",
+		Kind:           "InferenceService",
+		Runtime:        "sglang",
+		ModelURI:       "hf://Qwen/Qwen3.5-14B",
+		Replicas:       3,
+		DeploymentMode: "RawDeployment",
+		CPURequest:     "4",
+		CPULimit:       "8",
+		MemoryRequest:  "16Gi",
+		MemoryLimit:    "32Gi",
+		Env:            []EnvVar{{Name: "LOG_LEVEL", Value: "debug"}},
+		Command:        []string{"python", "-m", "server"},
+		Args:           []string{"--port", "8080"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateService: %v", err)
+	}
+	if updated.GetName() != "qwen-classic" || updated.GetUID() != "uid-service" {
+		t.Fatalf("identity changed: name=%q uid=%q", updated.GetName(), updated.GetUID())
+	}
+	if updated.GetAnnotations()["external.example.com/kept"] != "yes" {
+		t.Fatalf("external annotation lost")
+	}
+	if updated.GetAnnotations()[deploymentModeAnnotation] != "RawDeployment" {
+		t.Fatalf("deployment mode = %q", updated.GetAnnotations()[deploymentModeAnnotation])
+	}
+	if updated.GetLabels()["app.kubernetes.io/instance"] != "external" {
+		t.Fatalf("external label lost")
+	}
+	if updated.GetLabels()["knaic.io/managed"] != "true" {
+		t.Fatalf("managed label missing")
+	}
+	min, _, _ := unstructured.NestedInt64(updated.Object, "spec", "predictor", "minReplicas")
+	max, _, _ := unstructured.NestedInt64(updated.Object, "spec", "predictor", "maxReplicas")
+	if min != 3 || max != 3 {
+		t.Fatalf("replicas = %d/%d, want 3/3", min, max)
+	}
+	model, _, _ := unstructured.NestedMap(updated.Object, "spec", "predictor", "model")
+	if runtime, _, _ := unstructured.NestedString(model, "runtime"); runtime != "sglang" {
+		t.Fatalf("runtime = %q", runtime)
+	}
+	if uri, _, _ := unstructured.NestedString(model, "storageUri"); uri != "hf://Qwen/Qwen3.5-14B" {
+		t.Fatalf("storageUri = %q", uri)
+	}
+	if cpu, _, _ := unstructured.NestedString(model, "resources", "limits", "cpu"); cpu != "8" {
+		t.Fatalf("cpu limit = %q", cpu)
+	}
+	if env, ok, _ := unstructured.NestedSlice(model, "env"); !ok || len(env) != 1 {
+		t.Fatalf("env = %#v, ok=%v", env, ok)
+	}
+}
+
+func TestUpdateLLMInferenceServicePreservesIdentityAndRewritesSpec(t *testing.T) {
+	svc := newTestService()
+	if _, err := svc.CreateService(context.Background(), "team-ml", CreateServiceRequest{
+		Name:        "qwen-llm",
+		Kind:        "LLMInferenceService",
+		ModelURI:    "hf://Qwen/Qwen3.5-0.8B",
+		Replicas:    1,
+		BaseConfigs: []string{"old-config"},
+	}); err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	cur, err := svc.dyn.Resource(gvrLLMInferenceService).Namespace("team-ml").Get(context.Background(), "qwen-llm", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	cur.SetUID("uid-llm")
+	cur.SetLabels(map[string]string{"external": "kept"})
+	if _, err := svc.dyn.Resource(gvrLLMInferenceService).Namespace("team-ml").Update(context.Background(), cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("seed update: %v", err)
+	}
+
+	updated, err := svc.UpdateService(context.Background(), "team-ml", "qwen-llm", CreateServiceRequest{
+		Kind:           "LLMInferenceService",
+		ModelURI:       "hf://Qwen/Qwen3.5-7B",
+		ModelName:      "served-qwen",
+		Replicas:       2,
+		BaseConfigs:    []string{"template", "router"},
+		ContainerImage: "vllm/vllm-openai:v0.8.0",
+		CPURequest:     "2",
+		CPULimit:       "4",
+		MemoryRequest:  "8Gi",
+		MemoryLimit:    "16Gi",
+		Args:           []string{"--model", "/mnt/models"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateService: %v", err)
+	}
+	if updated.GetName() != "qwen-llm" || updated.GetUID() != "uid-llm" {
+		t.Fatalf("identity changed: name=%q uid=%q", updated.GetName(), updated.GetUID())
+	}
+	if updated.GetLabels()["external"] != "kept" {
+		t.Fatalf("external label lost")
+	}
+	uri, _, _ := unstructured.NestedString(updated.Object, "spec", "model", "uri")
+	if uri != "hf://Qwen/Qwen3.5-7B" {
+		t.Fatalf("model uri = %q", uri)
+	}
+	modelName, _, _ := unstructured.NestedString(updated.Object, "spec", "model", "name")
+	if modelName != "served-qwen" {
+		t.Fatalf("model name = %q", modelName)
+	}
+	refs, ok, _ := unstructured.NestedSlice(updated.Object, "spec", "baseRefs")
+	if !ok || len(refs) != 2 {
+		t.Fatalf("baseRefs = %#v, ok=%v", refs, ok)
+	}
+	containers, ok, _ := unstructured.NestedSlice(updated.Object, "spec", "template", "containers")
+	if !ok || len(containers) != 1 {
+		t.Fatalf("containers = %#v, ok=%v", containers, ok)
+	}
+	c := containers[0].(map[string]any)
+	if image, _, _ := unstructured.NestedString(c, "image"); image != "vllm/vllm-openai:v0.8.0" {
+		t.Fatalf("image = %q", image)
 	}
 }
 

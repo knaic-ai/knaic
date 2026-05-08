@@ -1,5 +1,6 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Layout, Menu, Dropdown, Avatar, Select, Tag, Space, Tooltip, Segmented } from 'antd';
+import { fetchClusterInfo, type ClusterInfo } from '@/api/auth';
 import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
@@ -19,6 +20,9 @@ import {
   BulbOutlined,
   BulbFilled,
   DesktopOutlined,
+  ApiOutlined,
+  FileTextOutlined,
+  HddOutlined,
 } from '@ant-design/icons';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useApp, type NamespaceRole } from '@/context/AppContext';
@@ -36,9 +40,21 @@ const roleColor: Record<NamespaceRole, string> = {
 };
 
 export function MainLayout() {
-  const { user, setUser, namespace, setNamespace, namespaces, themeMode, setThemeMode, isDark, roleIn } = useApp();
+  const { user, namespace, setNamespace, namespaces, themeMode, setThemeMode, isDark, roleIn } = useApp();
   const auth = useAuth();
   const loc = useLocation();
+  const [clusterInfo, setClusterInfo] = useState<ClusterInfo | null>(null);
+
+  // Pulled from kube-public/global-info via /api/v1/cluster-info; the
+  // header label tracks whichever cluster the backend is wired against.
+  useEffect(() => {
+    if (!apiEnabled) return;
+    let cancelled = false;
+    fetchClusterInfo().then(info => {
+      if (!cancelled) setClusterInfo(info);
+    }).catch(() => { /* fail-soft — header just won't show a cluster name */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // In API mode the backend has already filtered the namespaces list to those
   // the caller can see (via apiserver impersonation), so the local membership
@@ -68,23 +84,9 @@ export function MainLayout() {
         label: 'Monitoring',
         children: [
           { key: '/monitoring/resources', label: <Link to="/monitoring/resources">Resource usage</Link> },
+          { key: '/monitoring/gpu', label: <Link to="/monitoring/gpu">GPU status</Link> },
           { key: '/monitoring/llm', label: <Link to="/monitoring/llm">LLM services</Link> },
           { key: '/monitoring/train', label: <Link to="/monitoring/train">Train jobs</Link> },
-        ],
-      },
-      {
-        key: 'containers',
-        icon: <ContainerOutlined />,
-        label: 'Containers',
-        children: [
-          { key: '/containers/deployments', label: <Link to="/containers/deployments">Deployments</Link> },
-          { key: '/containers/statefulsets', label: <Link to="/containers/statefulsets">StatefulSets</Link> },
-          { key: '/containers/pods', label: <Link to="/containers/pods">Pods</Link> },
-          { key: '/containers/services', label: <Link to="/containers/services">Services</Link> },
-          { key: '/containers/configmaps', label: <Link to="/containers/configmaps">ConfigMaps</Link> },
-          { key: '/containers/secrets', label: <Link to="/containers/secrets">Secrets</Link> },
-          { key: '/containers/gateways', label: <Link to="/containers/gateways">Gateway API</Link> },
-          { key: '/containers/pvcs', label: <Link to="/containers/pvcs">PVC Volumes</Link> },
         ],
       },
       {
@@ -92,8 +94,8 @@ export function MainLayout() {
         icon: <CloudServerOutlined />,
         label: 'Inference',
         children: [
-          { key: '/inference/serving-runtimes', label: <Link to="/inference/serving-runtimes">Serving Runtimes</Link> },
           { key: '/inference/services', label: <Link to="/inference/services">Inference Services</Link> },
+          { key: '/inference/serving-runtimes', label: <Link to="/inference/serving-runtimes">Serving Runtimes</Link> },
           { key: '/inference/storage-initializers', label: <Link to="/inference/storage-initializers">Storage Initializer</Link> },
           { key: '/inference/llm-configs', label: <Link to="/inference/llm-configs">LLM Inference Config</Link> },
         ],
@@ -108,6 +110,7 @@ export function MainLayout() {
           { key: '/playground/agent', label: <Link to="/playground/agent">Agent</Link> },
         ],
       },
+      { key: '/notebooks', icon: <BookOutlined />, label: <Link to="/notebooks">Notebooks</Link> },
       {
         key: 'training',
         icon: <ExperimentOutlined />,
@@ -117,7 +120,46 @@ export function MainLayout() {
           { key: '/training/jobs', label: <Link to="/training/jobs">Train Jobs</Link> },
         ],
       },
-      { key: '/notebooks', icon: <BookOutlined />, label: <Link to="/notebooks">Notebooks</Link> },
+      // Per-resource Kubernetes views grouped by function. Routes still live
+      // under /containers/* so deep links keep working — only the menu
+      // grouping has changed.
+      { type: 'divider' as const },
+      {
+        key: 'containers',
+        icon: <ContainerOutlined />,
+        label: 'Containers',
+        children: [
+          { key: '/containers/deployments', label: <Link to="/containers/deployments">Deployments</Link> },
+          { key: '/containers/statefulsets', label: <Link to="/containers/statefulsets">StatefulSets</Link> },
+          { key: '/containers/pods', label: <Link to="/containers/pods">Pods</Link> },
+        ],
+      },
+      {
+        key: 'networking',
+        icon: <ApiOutlined />,
+        label: 'Networking',
+        children: [
+          { key: '/containers/services', label: <Link to="/containers/services">Services</Link> },
+          { key: '/containers/gateways', label: <Link to="/containers/gateways">Gateway API</Link> },
+        ],
+      },
+      {
+        key: 'configuration',
+        icon: <FileTextOutlined />,
+        label: 'Configuration',
+        children: [
+          { key: '/containers/configmaps', label: <Link to="/containers/configmaps">ConfigMaps</Link> },
+          { key: '/containers/secrets', label: <Link to="/containers/secrets">Secrets</Link> },
+        ],
+      },
+      {
+        key: 'storage',
+        icon: <HddOutlined />,
+        label: 'Storage',
+        children: [
+          { key: '/containers/pvcs', label: <Link to="/containers/pvcs">PVC Volumes</Link> },
+        ],
+      },
       {
         key: 'users',
         icon: <TeamOutlined />,
@@ -155,36 +197,48 @@ export function MainLayout() {
 
   const openKeys = useMemo(() => {
     const p = loc.pathname;
-    const groups: Record<string, string> = {
-      '/models': 'models-group',
-      '/monitoring': 'monitor-group',
-      '/containers': 'containers',
-      '/inference': 'inference',
-      '/playground': 'playground',
-      '/training': 'training',
-      '/users': 'users',
-      '/admin': 'admin',
-    };
-    return Object.entries(groups)
-      .filter(([prefix]) => p.startsWith(prefix))
-      .map(([, v]) => v);
+    // Most-specific first — the per-path entries below need to win over the
+    // generic /containers fallback so e.g. /containers/services opens
+    // "networking" rather than "containers".
+    const rules: { prefix: string; group: string }[] = [
+      { prefix: '/containers/services', group: 'networking' },
+      { prefix: '/containers/gateways', group: 'networking' },
+      { prefix: '/containers/configmaps', group: 'configuration' },
+      { prefix: '/containers/secrets', group: 'configuration' },
+      { prefix: '/containers/pvcs', group: 'storage' },
+      { prefix: '/containers', group: 'containers' },
+      { prefix: '/models', group: 'models-group' },
+      { prefix: '/monitoring', group: 'monitor-group' },
+      { prefix: '/inference', group: 'inference' },
+      { prefix: '/playground', group: 'playground' },
+      { prefix: '/training', group: 'training' },
+      { prefix: '/users', group: 'users' },
+      { prefix: '/admin', group: 'admin' },
+    ];
+    for (const { prefix, group } of rules) {
+      if (p.startsWith(prefix)) return [group];
+    }
+    return [];
   }, [loc.pathname]);
 
   const userMenu: MenuProps['items'] = [
     { key: 'profile', icon: <UserOutlined />, label: `${user.name} · ${user.email}` },
+    { type: 'divider' },
     {
-      key: 'role-toggle',
+      key: 'theme',
+      // Inline Segmented inside a menu row so the user can flip light /
+      // dark / auto without leaving the dropdown.
       label: (
         <Space>
-          <span>Platform admin</span>
+          <span>Theme</span>
           <Segmented
             size="small"
-            disabled={apiEnabled}
-            value={user.isPlatformAdmin ? 'yes' : 'no'}
-            onChange={v => setUser({ ...user, isPlatformAdmin: v === 'yes' })}
+            value={themeMode}
+            onChange={v => setThemeMode(v as 'light' | 'dark' | 'auto')}
             options={[
-              { label: 'Yes', value: 'yes' },
-              { label: 'No', value: 'no' },
+              { icon: <BulbOutlined />, value: 'light' },
+              { icon: <BulbFilled />, value: 'dark' },
+              { icon: <DesktopOutlined />, value: 'auto' },
             ]}
           />
         </Space>
@@ -222,24 +276,21 @@ export function MainLayout() {
       </Sider>
       <Layout>
         <Header style={{ borderBottom: '1px solid var(--knaic-hdr-border, #d0e0fb)', display: 'flex', alignItems: 'center' }}>
+          {/*
+            Left side: brand → cluster name → namespace selector → role tag.
+            Per the cpaas convention, clusterName comes from the
+            kube-public/global-info ConfigMap; the namespace selector lives
+            right next to it because the two answer the same question
+            ("where am I working?").
+          */}
           <Space size={12} style={{ flex: 1 }}>
             <Tag color="blue" style={{ margin: 0 }}>
               <AppstoreOutlined /> Kubernetes Native AI Console
             </Tag>
-            <span className="knaic-sub">Cluster: prod-ai-01</span>
-          </Space>
-          <Space size={12}>
-            <Tooltip title="Color theme">
-              <Segmented
-                size="small"
-                value={themeMode}
-                onChange={v => setThemeMode(v as 'light' | 'dark' | 'auto')}
-                options={[
-                  { icon: <BulbOutlined />, value: 'light', label: 'Light' },
-                  { icon: <BulbFilled />, value: 'dark', label: 'Dark' },
-                  { icon: <DesktopOutlined />, value: 'auto', label: 'Auto' },
-                ]}
-              />
+            <Tooltip title="Cluster identity (kube-public/global-info)">
+              <span className="knaic-sub">
+                Cluster: <b>{clusterInfo?.clusterName || (apiEnabled ? '…' : 'prototype')}</b>
+              </span>
             </Tooltip>
             <Tooltip title="Current namespace (workspace)">
               <Select
@@ -255,6 +306,8 @@ export function MainLayout() {
                 {currentRole}
               </Tag>
             )}
+          </Space>
+          <Space size={12}>
             <Dropdown menu={{ items: userMenu }} placement="bottomRight">
               <Space style={{ cursor: 'pointer' }}>
                 <Avatar size="small" style={{ background: '#2468f2' }}>

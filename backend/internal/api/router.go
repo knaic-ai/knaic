@@ -11,6 +11,7 @@ import (
 	"github.com/alauda/knaic-backend/internal/admin"
 	"github.com/alauda/knaic-backend/internal/auth"
 	"github.com/alauda/knaic-backend/internal/components"
+	"github.com/alauda/knaic-backend/internal/gpu"
 	"github.com/alauda/knaic-backend/internal/inference"
 	"github.com/alauda/knaic-backend/internal/k8s"
 	"github.com/alauda/knaic-backend/internal/k8sres"
@@ -23,24 +24,26 @@ import (
 )
 
 type Deps struct {
-	Verifier     *auth.Verifier
-	AuthProxy    *auth.Proxy
-	AuthConfig   AuthConfig
-	AuthDisabled bool
-	K8s          *k8s.Clients
-	UserClaim    string // OIDC claim used as the impersonated apiserver username
-	UserPrefix   string // optional prefix prepended to the impersonated username
-	Components   *components.Service
-	Registry     *registry.Store
-	K8sRes       *k8sres.Service
-	Admin        *admin.Service
-	Inference    *inference.Service
-	Notebook     *notebook.Service
-	Models       *models.Service
-	Training     *training.Service
-	Monitoring   *monitoring.Service
-	Playground   *playground.Service
-	CORSOrigins  []string
+	Verifier        *auth.Verifier
+	AuthProxy       *auth.Proxy
+	AuthConfig      AuthConfig
+	AuthDisabled    bool
+	K8s             *k8s.Clients
+	UserClaim       string // OIDC claim used as the impersonated apiserver username
+	UserPrefix      string // optional prefix prepended to the impersonated username
+	Components      *components.Service
+	GPU             *gpu.Service
+	Registry        *registry.Store
+	K8sRes          *k8sres.Service
+	Admin           *admin.Service
+	Inference       *inference.Service
+	Notebook        *notebook.Service
+	Models          *models.Service
+	Training        *training.Service
+	Monitoring      *monitoring.Service
+	Playground      *playground.Service
+	AgentAPIBaseURL string
+	CORSOrigins     []string
 }
 
 type AuthConfig struct {
@@ -95,6 +98,13 @@ func NewRouter(d Deps) http.Handler {
 				}
 				writeJSON(w, http.StatusOK, u)
 			})
+
+			// Cluster identity (cluster name + platform URL) for the
+			// header bar. Sourced from kube-public/global-info, which is
+			// safe for any authenticated user to read.
+			if d.K8s != nil {
+				r.Get("/cluster-info", newClusterInfoHandler(d.K8s.Typed))
+			}
 
 			r.Route("/components", func(r chi.Router) {
 				// Read paths are open to any authenticated user; mutations
@@ -176,8 +186,22 @@ func NewRouter(d Deps) http.Handler {
 			if d.Monitoring != nil {
 				newMonitoringAPI(d.Monitoring).routes(r)
 			}
+			if d.GPU != nil {
+				gpuAPI := newGPUAPI(newK8sClientSource(d), d.GPU, d.Monitoring)
+				// Status: cluster scope is admin-gated by the handler
+				// itself (it picks the SA-backed service for admins and
+				// rejects cluster-wide reads from non-admins via the
+				// impersonating fallback). Namespace scope is open to any
+				// authenticated user with read on pods in that namespace.
+				r.Get("/gpu/status", gpuAPI.status)
+				r.Group(func(r chi.Router) {
+					r.Use(auth.RequirePlatformAdmin)
+					// Per-card DCGM utilisation — cluster-wide metrics, admin only.
+					r.Get("/gpu/device-usage", gpuAPI.deviceUsage)
+				})
+			}
 			if d.Playground != nil {
-				newPlaygroundAPI(d.Playground).routes(r)
+				newPlaygroundAPI(d.Playground, d.AgentAPIBaseURL).routes(r)
 			}
 		})
 	})

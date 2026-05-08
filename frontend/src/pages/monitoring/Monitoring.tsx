@@ -30,6 +30,32 @@ const resourceOptions: { label: string; value: Resource }[] = [
 const allKinds: Kind[] = ['usage', 'requests', 'limits'];
 type ChartData = Record<Resource, Array<Record<string, string | number>>>;
 
+const resourceUnit: Record<Resource, string> = {
+  cpu: 'cores',
+  memory: 'GiB',
+  gpu: 'GPU',
+  disk: 'GiB',
+  network: 'MiB/s',
+};
+
+// roundFor picks a per-resource precision. GPU is integer-only (you can't
+// have 2.137 GPUs); the rest get two decimals so the chart Y-axis and the
+// tooltip don't show 16-digit float garbage like 0.6543908463969536.
+function roundFor(resource: Resource, value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (resource === 'gpu') return Math.round(value);
+  return Math.round(value * 100) / 100;
+}
+
+// formatTick is the Y-axis label renderer — it strips trailing zeros so a
+// "3.00 GiB" tick shows as "3 GiB" rather than "3.00 GiB". Tight scales like
+// CPU (0.65, 0.71, …) keep their decimals.
+function formatTick(resource: Resource, value: number): string {
+  const r = roundFor(resource, value);
+  if (Number.isInteger(r)) return String(r);
+  return r.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
 function fallbackChartData(scope: Scope, target: string): ChartData {
   const map: ChartData = {
     cpu: [],
@@ -44,9 +70,9 @@ function fallbackChartData(scope: Scope, target: string): ChartData {
     const lim = buildSeries(scope, target, r.value, 'limits');
     map[r.value] = usage.points.map((p, i) => ({
       t: p.t,
-      usage: p.v,
-      requests: req.points[i]?.v ?? 0,
-      limits: lim.points[i]?.v ?? 0,
+      usage: roundFor(r.value, p.v),
+      requests: roundFor(r.value, req.points[i]?.v ?? 0),
+      limits: roundFor(r.value, lim.points[i]?.v ?? 0),
     }));
   }
   return map;
@@ -96,9 +122,9 @@ export function Monitoring() {
       );
       return [r.value, usage.points.map((p, i) => ({
         t: p.t,
-        usage: p.v,
-        requests: requests.points[i]?.v ?? 0,
-        limits: limits.points[i]?.v ?? 0,
+        usage: roundFor(r.value, p.v),
+        requests: roundFor(r.value, requests.points[i]?.v ?? 0),
+        limits: roundFor(r.value, limits.points[i]?.v ?? 0),
       }))] as const;
     }))
       .then(entries => {
@@ -169,14 +195,29 @@ export function Monitoring() {
       <Row gutter={[12, 12]}>
         {resourceOptions.map(r => (
           <Col span={12} key={r.value}>
-            <Card title={r.label} size="small" extra={<span className="knaic-sub mono">{r.value}_{kinds.join('|')}</span>}>
+            <Card
+              title={
+                <Space size={6}>
+                  <span>{r.label}</span>
+                  <span className="knaic-sub" style={{ fontWeight: 400 }}>{resourceUnit[r.value]}</span>
+                </Space>
+              }
+              size="small"
+              extra={<span className="knaic-sub mono">{r.value}_{kinds.join('|')}</span>}
+            >
               <div style={{ height: 220 }}>
                 <ResponsiveContainer>
                   <ComposedChart data={chartData[r.value]}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef0f3" />
                     <XAxis dataKey="t" tick={{ fontSize: 10 }} />
-                    <YAxis tick={{ fontSize: 10 }} />
-                    <Tooltip />
+                    <YAxis
+                      tick={{ fontSize: 10 }}
+                      tickFormatter={(v: number) => formatTick(r.value, v)}
+                      width={56}
+                    />
+                    <Tooltip
+                      formatter={(v: number) => `${formatTick(r.value, v)} ${resourceUnit[r.value]}`}
+                    />
                     {kinds.includes('limits') && (
                       <Line type="monotone" dataKey="limits" stroke="#e94f4f" dot={false} strokeDasharray="4 4" />
                     )}

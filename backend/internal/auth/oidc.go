@@ -95,7 +95,9 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 			Groups:          c.Groups,
 			IsPlatformAdmin: slices.Contains(c.Groups, v.adminGroup),
 		}
-		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), u)))
+		ctx := WithUser(r.Context(), u)
+		ctx = WithBearer(ctx, raw)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

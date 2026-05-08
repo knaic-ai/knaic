@@ -71,7 +71,7 @@ Production deployment additionally requires:
 | 4.   Model Hub | ✅ in-memory or Postgres metadata | ✅ wired |
 | 5.   Resource monitoring | ✅ Prometheus query proxy + dev fallback | UI prototype charts |
 | 7.   Inference services / serving runtimes | ✅ structured create + generic CRUD | ✅ wired |
-| 8.   LLM playground | ✅ provider registry + OpenAI-compatible chat/stream proxy | UI prototype stores |
+| 8.   LLM playground | ✅ provider registry + OpenAI-compatible chat/stream proxy + opencode-backed agent | ✅ wired |
 | 9.   Training runtimes / TrainJobs | ✅ structured create + MLflow proxy | ✅ wired |
 | 10.  Notebooks | ✅ create/start/stop + PVC support | ✅ wired |
 
@@ -85,3 +85,4 @@ See `backend/README.md` for the full env-var matrix. Key flags:
 - `KNAIC_SYSTEM_NAMESPACE` (default `knaic-system`)
 - `KNAIC_DB_URL` for Postgres-backed model metadata
 - `KNAIC_PROMETHEUS_URL` for live monitoring data from Prometheus
+- `KNAIC_OPENCODE_BIN` if `opencode` is not on the backend PATH

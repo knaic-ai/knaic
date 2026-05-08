@@ -23,7 +23,7 @@ This is the first vertical slice. Implemented:
 | Notebooks | ✅ create/start/stop + optional PVC creation |
 | Admin: nodes, namespaces, quotas, RBAC, observed users | ✅ |
 | Monitoring | ✅ Prometheus `query_range` proxy with dev synthetic fallback |
-| Playground | ✅ LLM provider registry + OpenAI-compatible chat/stream proxy |
+| Playground | ✅ LLM provider registry + OpenAI-compatible chat/stream proxy + opencode-backed read-only agent |
 | Frontend wired to API | ✅ first slices wired; some new admin/monitoring/playground APIs are backend-ready |
 
 Remaining backend-heavy work: real chart vendoring for the remaining built-in
@@ -46,7 +46,7 @@ internal/
   k8s/                # rest.Config + typed/dynamic/discovery clients
   logx/               # slog wrapper
   monitoring/         # Prometheus query_range proxy
-  playground/         # LLM provider registry + chat proxy
+  playground/         # LLM provider registry, chat proxy, agent sessions/tools
   registry/           # built-in image registry config store
 build/sync-images.sh  # skopeo-based mirror job
 ```
@@ -104,6 +104,44 @@ uses `SubjectAccessReview` instead. A non-admin user must be allowed to
 `create` `configmaps` in the target namespace to create/import/upload/patch
 private models in that namespace.
 
+### Monitoring backends
+
+The Monitoring service hits a single endpoint — `GET ${KNAIC_PROMETHEUS_URL}/api/v1/query_range` — and decodes the standard Prometheus matrix response. Anything wire-compatible with that endpoint works as a drop-in:
+
+| Backend | `KNAIC_PROMETHEUS_URL` example |
+|---|---|
+| Prometheus | `http://prometheus.monitoring.svc.cluster.local:9090` |
+| Thanos Querier | `http://thanos-query.monitoring.svc.cluster.local:9090` |
+| VictoriaMetrics single-node (`victoria-metrics`) | `http://victoria-metrics.victoria-metrics.svc.cluster.local:8428` |
+| VictoriaMetrics cluster (`vmselect`) | `http://vmselect.victoria-metrics.svc.cluster.local:8481/select/0/prometheus` |
+| VictoriaMetrics with vmauth in front | `http://vmauth.victoria-metrics.svc.cluster.local:8427` |
+
+For the VictoriaMetrics cluster path, note the trailing **`/select/<accountID>/prometheus`** — `vmselect`'s Prometheus-API surface is mounted under that prefix, and accountID is `0` unless you've explicitly partitioned tenants.
+
+knaic only emits PromQL via `/api/v1/query_range`, so VM-specific extensions (MetricsQL operators, subquery shortcuts, `WITH` templates, etc.) aren't required — but they will work since VM accepts MetricsQL on the same endpoint.
+
+If `KNAIC_PROMETHEUS_URL` is left empty the backend serves a deterministic synthetic series, useful for local UI development without a metrics stack.
+
+#### Authenticating to the upstream
+
+By default knaic sends queries unauthenticated, which works when the upstream is reachable in-cluster without a gate. When the upstream is fronted by an `oauth2-proxy` sidecar — common with cpaas-deployed VictoriaMetrics — set:
+
+| Env var | Default | Notes |
+|---|---|---|
+| `KNAIC_PROMETHEUS_AUTH` | _(empty)_ | `forward` to forward the verified Dex bearer of the calling user; `bearer` to send a fixed token; empty for no header. |
+| `KNAIC_PROMETHEUS_BEARER` | _(empty)_ | Static bearer token. Used when `KNAIC_PROMETHEUS_AUTH=bearer`, or as a fallback when `forward` mode encounters a request with no caller token (background jobs etc.). |
+
+**Production with cpaas + same Dex provider.** Both knaic and the VM oauth2-proxy verify JWTs minted by the same Dex issuer. Configure oauth2-proxy with `--skip-jwt-bearer-tokens=true` (and the right `--oidc-issuer-url`) so it accepts an `Authorization: Bearer <jwt>` header instead of forcing a browser cookie flow. Then on the knaic side:
+
+```bash
+KNAIC_PROMETHEUS_URL=http://vmselect.cpaas-system.svc.cluster.local:8481/select/multitenant/prometheus
+KNAIC_PROMETHEUS_AUTH=forward
+```
+
+Each `/api/v1/monitoring/query` request now reaches vmselect with the calling user's verified Dex JWT, so VM tenant ACLs and the user's group claims drive what they can read — exactly like every other read knaic forwards to the apiserver via impersonation.
+
+If you also want background / unauthenticated calls (none today, but e.g. a future warm-up job) to still authenticate, fill `KNAIC_PROMETHEUS_BEARER` with a long-lived service-account token.
+
 ### Configuration
 
 | Env var | Default | Notes |
@@ -127,8 +165,13 @@ private models in that namespace.
 | `KNAIC_REGISTRY_PROJECT` | `components` | path under the registry |
 | `KNAIC_REGISTRY_USE_EMBED` | `true` | use the in-cluster bundled registry |
 | `KNAIC_CORS_ORIGINS` | dev defaults | comma-separated allow-list |
-| `KNAIC_DB_URL` | _(empty)_ | Postgres DSN for model metadata; empty uses in-memory store |
-| `KNAIC_PROMETHEUS_URL` | _(empty)_ | Prometheus base URL; empty uses deterministic synthetic dev series |
+| `KNAIC_DB_URL` | _(empty)_ | Postgres DSN for model metadata and Playground agent sessions; empty uses in-memory stores |
+| `KNAIC_PROMETHEUS_URL` | _(empty)_ | Prometheus-compatible base URL; empty uses deterministic synthetic dev series. See [Monitoring backends](#monitoring-backends) for VictoriaMetrics. |
+| `KNAIC_PROMETHEUS_AUTH` | _(empty)_ | `forward` forwards the user's verified Dex bearer to the upstream (use with cpaas-style oauth2-proxy + `--skip-jwt-bearer-tokens`); `bearer` sends `KNAIC_PROMETHEUS_BEARER`; empty sends no header. |
+| `KNAIC_PROMETHEUS_BEARER` | _(empty)_ | Static bearer for `KNAIC_PROMETHEUS_AUTH=bearer`, or fallback used by `forward` mode when no caller token is present. |
+| `KNAIC_OPENCODE_BIN` | `opencode` | opencode executable used by Playground Agent |
+| `KNAIC_AGENT_WORKDIR` | OS temp dir | base directory for generated opencode configs, state, and data |
+| `KNAIC_AGENT_API_BASE` | derived from `KNAIC_ADDR` | backend URL the local MCP tool server calls from opencode |
 
 ## API surface (v1)
 
@@ -203,6 +246,11 @@ PATCH  /api/v1/playground/providers/{id}
 DELETE /api/v1/playground/providers/{id}
 POST   /api/v1/playground/chat
 POST   /api/v1/playground/chat/stream
+GET    /api/v1/playground/agent/sessions
+POST   /api/v1/playground/agent/sessions
+GET    /api/v1/playground/agent/sessions/{id}
+DELETE /api/v1/playground/agent/sessions/{id}
+POST   /api/v1/playground/agent/sessions/{id}/run
 ```
 
 ## Image registry sync

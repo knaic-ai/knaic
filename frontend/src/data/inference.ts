@@ -46,10 +46,15 @@ export interface InferenceService {
   minReplicas: number;
   maxReplicas: number;
   resources: { cpu: string; memory: string; gpu: number };
+  cpuRequest?: string;
   cpuLimit?: string;
+  memoryRequest?: string;
   memoryLimit?: string;
   gpuProfileId?: string;
   gpuValues?: Record<string, number>;
+  baseConfigs?: string[];
+  modelName?: string;
+  containerImage?: string;
   env?: { name: string; value: string }[];
   command?: string[];
   args?: string[];
@@ -150,6 +155,7 @@ import {
   listInferenceServices as apiListServices,
   listServingRuntimes as apiListRuntimes,
   createInferenceService as apiCreateService,
+  updateInferenceService as apiUpdateService,
   createServingRuntime as apiCreateRuntime,
   updateServingRuntime as apiUpdateRuntime,
   type CreateServiceRequest,
@@ -316,6 +322,47 @@ export async function createInferenceService(ns: string, req: CreateServiceReque
     },
     ...prev,
   ]);
+}
+
+export async function updateInferenceService(ns: string, name: string, req: CreateServiceRequest): Promise<void> {
+  if (apiEnabled) {
+    await apiUpdateService(ns, name, req);
+    reloadInferenceServices(ns);
+    return;
+  }
+  servicesStore.set(prev =>
+    prev.map(s =>
+      s.namespace === ns && s.name === name
+        ? fillServiceDefaults({
+            ...s,
+            name,
+            kind: req.kind,
+            runtime: req.runtime ?? s.runtime,
+            modelUri: req.modelUri,
+            minReplicas: req.replicas,
+            maxReplicas: req.replicas,
+            resources: {
+              cpu: req.cpuRequest,
+              memory: req.memoryRequest,
+              gpu: req.gpuValues?.['nvidia.com/gpu'] ?? s.resources.gpu,
+            },
+            cpuRequest: req.cpuRequest,
+            cpuLimit: req.cpuLimit,
+            memoryRequest: req.memoryRequest,
+            memoryLimit: req.memoryLimit,
+            gpuValues: req.gpuValues,
+            baseConfigs: req.baseConfigs,
+            modelName: req.modelName,
+            containerImage: req.containerImage,
+            env: req.env,
+            command: req.command,
+            args: req.args,
+            deploymentMode: req.deploymentMode,
+            status: 'Progressing',
+          })
+        : s,
+    ),
+  );
 }
 
 export async function updateServingRuntime(ns: string, name: string, req: CreateRuntimeRequest): Promise<void> {

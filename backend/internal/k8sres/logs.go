@@ -34,6 +34,18 @@ type InferenceLogTarget struct {
 	Containers []string
 }
 
+// InferencePodInfo describes one pod backing an InferenceService for the
+// log viewer's pod picker. During a rolling update there are multiple pods
+// (old ReplicaSet + new ReplicaSet); the picker lets the user inspect each.
+type InferencePodInfo struct {
+	Name           string   `json:"name"`
+	Phase          string   `json:"phase"`
+	Ready          bool     `json:"ready"`
+	Containers     []string `json:"containers"`
+	InitContainers []string `json:"initContainers,omitempty"`
+	CreatedAt      string   `json:"createdAt,omitempty"`
+}
+
 // ResolveInferenceLogTarget picks the best matching pod for an
 // InferenceService or LLMInferenceService. It prefers standard KServe labels,
 // then common app/owner/name fallbacks for installs with different labels.
@@ -263,6 +275,69 @@ func podContainerNames(pod *corev1.Pod) []string {
 		}
 	}
 	return names
+}
+
+func podInitContainerNames(pod *corev1.Pod) []string {
+	names := make([]string, 0, len(pod.Spec.InitContainers))
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name != "" {
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
+
+// ListInferencePods returns every pod that the resolver considers a match
+// for the given InferenceService / LLMInferenceService — sorted newest-first
+// so the freshly-rolled ReplicaSet's pod is on top during a rollout. The log
+// viewer uses this to let users switch between pods (and inspect old ones
+// before the controller GCs them).
+func (s *Service) ListInferencePods(ctx context.Context, namespace, name, kind string) ([]InferencePodInfo, error) {
+	if s.typed == nil {
+		return nil, fmt.Errorf("typed Kubernetes client not initialized")
+	}
+	list, err := s.typed.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	type scored struct {
+		pod   corev1.Pod
+		score int
+	}
+	var hits []scored
+	for _, pod := range list.Items {
+		score := inferencePodScore(&pod, name, kind)
+		if score <= 0 {
+			continue
+		}
+		hits = append(hits, scored{pod: pod, score: score})
+	}
+	sort.SliceStable(hits, func(i, j int) bool {
+		a, b := hits[i], hits[j]
+		// Highest match score first, then ready pods, then newest, then name.
+		if a.score != b.score {
+			return a.score > b.score
+		}
+		if podReady(&a.pod) != podReady(&b.pod) {
+			return podReady(&a.pod)
+		}
+		if !a.pod.CreationTimestamp.Equal(&b.pod.CreationTimestamp) {
+			return a.pod.CreationTimestamp.After(b.pod.CreationTimestamp.Time)
+		}
+		return a.pod.Name < b.pod.Name
+	})
+	out := make([]InferencePodInfo, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, InferencePodInfo{
+			Name:           h.pod.Name,
+			Phase:          string(h.pod.Status.Phase),
+			Ready:          podReady(&h.pod),
+			Containers:     podContainerNames(&h.pod),
+			InitContainers: podInitContainerNames(&h.pod),
+			CreatedAt:      h.pod.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	return out, nil
 }
 
 func preferredInferenceContainer(containers []string) string {

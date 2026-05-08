@@ -11,6 +11,7 @@ import { ModelHub } from './pages/models/ModelHub';
 import { Monitoring } from './pages/monitoring/Monitoring';
 import { LLMMonitoring } from './pages/monitoring/LLMMonitoring';
 import { TrainMonitoring } from './pages/monitoring/TrainMonitoring';
+import { GPUStatus } from './pages/monitoring/GPUStatus';
 import { Deployments } from './pages/containers/Deployments';
 import { StatefulSets } from './pages/containers/StatefulSets';
 import { Pods } from './pages/containers/Pods';
@@ -49,6 +50,7 @@ export default function App() {
         <Route path="/monitoring/resources" element={<Monitoring />} />
         <Route path="/monitoring/llm" element={<LLMMonitoring />} />
         <Route path="/monitoring/train" element={<TrainMonitoring />} />
+        <Route path="/monitoring/gpu" element={<GPUStatus />} />
         <Route path="/containers/deployments" element={<Deployments />} />
         <Route path="/containers/statefulsets" element={<StatefulSets />} />
         <Route path="/containers/pods" element={<Pods />} />

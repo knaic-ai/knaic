@@ -75,6 +75,13 @@ export function createInferenceService(ns: string, req: CreateServiceRequest): P
   });
 }
 
+export function updateInferenceService(ns: string, name: string, req: CreateServiceRequest): Promise<unknown> {
+  return request<unknown>(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(name)}`,
+    { method: 'PUT', body: req },
+  );
+}
+
 export function createServingRuntime(ns: string, req: CreateRuntimeRequest): Promise<unknown> {
   return request<unknown>(`/api/v1/namespaces/${encodeURIComponent(ns)}/inference/runtimes`, {
     method: 'POST',
@@ -118,5 +125,28 @@ export function streamInferenceServiceLogs(
   return streamLogEndpoint(
     `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(name)}/logs?${params}`,
     opts,
+  );
+}
+
+export interface InferencePodInfo {
+  name: string;
+  phase: string;
+  ready: boolean;
+  containers: string[];
+  initContainers?: string[];
+  createdAt?: string;
+}
+
+// Lists every pod backing an inference service. The log viewer's pod picker
+// uses this so users can read logs from old replicas during a rolling update
+// or step into init containers (e.g. storage-initializer) that have already
+// completed.
+export function listInferenceServicePods(
+  ns: string,
+  name: string,
+  kind: InferenceService['kind'],
+): Promise<InferencePodInfo[]> {
+  return request<InferencePodInfo[]>(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(name)}/pods?kind=${encodeURIComponent(kind)}`,
   );
 }

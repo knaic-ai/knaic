@@ -8,9 +8,9 @@ import (
 )
 
 type Config struct {
-	Addr            string
-	SystemNamespace string
-	KubeconfigPath  string
+	Addr             string
+	SystemNamespace  string
+	KubeconfigPath   string
 	ComponentCatalog string
 	PublicModelsSeed string
 
@@ -31,7 +31,13 @@ type Config struct {
 
 	DatabaseURL string
 
-	PrometheusURL string
+	PrometheusURL    string
+	PrometheusAuth   string // "", "forward", or "bearer"
+	PrometheusBearer string
+
+	OpenCodeBin     string
+	AgentWorkDir    string
+	AgentAPIBaseURL string
 
 	CORSOrigins []string
 }
@@ -58,6 +64,11 @@ func Load() (*Config, error) {
 		RegistryUseEmbed:       boolEnv("KNAIC_REGISTRY_USE_EMBED", true),
 		DatabaseURL:            env("KNAIC_DB_URL", ""),
 		PrometheusURL:          env("KNAIC_PROMETHEUS_URL", ""),
+		PrometheusAuth:         env("KNAIC_PROMETHEUS_AUTH", ""),
+		PrometheusBearer:       env("KNAIC_PROMETHEUS_BEARER", ""),
+		OpenCodeBin:            env("KNAIC_OPENCODE_BIN", "opencode"),
+		AgentWorkDir:           env("KNAIC_AGENT_WORKDIR", ""),
+		AgentAPIBaseURL:        env("KNAIC_AGENT_API_BASE", ""),
 		CORSOrigins:            splitCSV(env("KNAIC_CORS_ORIGINS", "http://localhost:4300,http://localhost:5173")),
 	}
 	if !c.AuthDisabled && c.OIDCIssuer == "" {

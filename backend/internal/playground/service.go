@@ -12,21 +12,37 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/alauda/knaic-backend/internal/auth"
 )
 
 var ErrNotFound = errors.New("provider not found")
 
 type Service struct {
-	mu        sync.RWMutex
-	providers map[string]Provider
-	counter   int64
-	client    *http.Client
+	mu          sync.RWMutex
+	providers   map[string]Provider
+	counter     int64
+	client      *http.Client
+	agentStore  AgentStore
+	agentRunner AgentRunner
 }
 
 func NewService() *Service {
+	return NewServiceWithAgentStore(NewMemoryAgentStore(), NewOpenCodeRunner(OpenCodeOptions{}))
+}
+
+func NewServiceWithAgentStore(store AgentStore, runner AgentRunner) *Service {
+	if store == nil {
+		store = NewMemoryAgentStore()
+	}
+	if runner == nil {
+		runner = NewOpenCodeRunner(OpenCodeOptions{})
+	}
 	return &Service{
-		providers: map[string]Provider{},
-		client:    &http.Client{Timeout: 60 * time.Second},
+		providers:   map[string]Provider{},
+		client:      &http.Client{Timeout: 60 * time.Second},
+		agentStore:  store,
+		agentRunner: runner,
 	}
 }
 
@@ -201,6 +217,81 @@ func (s *Service) providerForChat(id string) (Provider, *http.Client, error) {
 		return Provider{}, nil, fmt.Errorf("provider %q is not ready", p.Name)
 	}
 	return p, s.client, nil
+}
+
+func (s *Service) ListAgentSessions(ctx context.Context, u *auth.User, namespace string) ([]AgentSession, error) {
+	return s.agentStore.ListSessions(ctx, ownerFromUser(u), namespace)
+}
+
+func (s *Service) CreateAgentSession(ctx context.Context, u *auth.User, req CreateAgentSessionRequest) (AgentSession, error) {
+	if req.ProviderID == "" {
+		return AgentSession{}, errors.New("providerId is required")
+	}
+	if _, _, err := s.providerForChat(req.ProviderID); err != nil {
+		return AgentSession{}, err
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = "New agent session"
+	}
+	return s.agentStore.CreateSession(ctx, AgentSession{
+		Owner:      ownerFromUser(u),
+		Namespace:  req.Namespace,
+		ProviderID: req.ProviderID,
+		Title:      title,
+		Skills:     req.Skills,
+	})
+}
+
+func (s *Service) GetAgentSession(ctx context.Context, u *auth.User, id string) (AgentSession, error) {
+	return s.agentStore.GetSession(ctx, ownerFromUser(u), id)
+}
+
+func (s *Service) DeleteAgentSession(ctx context.Context, u *auth.User, id string) error {
+	return s.agentStore.DeleteSession(ctx, ownerFromUser(u), id)
+}
+
+func (s *Service) RunAgent(ctx context.Context, u *auth.User, sessionID string, req AgentRunRequest, runCtx AgentRunContext, emit func(AgentEvent)) error {
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		return errors.New("message is required")
+	}
+	session, err := s.agentStore.GetSession(ctx, ownerFromUser(u), sessionID)
+	if err != nil {
+		return err
+	}
+	provider, _, err := s.providerForChat(session.ProviderID)
+	if err != nil {
+		return err
+	}
+	if err := s.agentStore.AppendMessage(ctx, session.ID, AgentMessage{Role: "user", Content: msg}); err != nil {
+		return err
+	}
+	namespace := firstNonEmpty(runCtx.Namespace, session.Namespace)
+	var final strings.Builder
+	err = s.agentRunner.Run(ctx, AgentRunnerRequest{
+		SessionID:  session.OpenCodeSession,
+		Message:    msg,
+		Provider:   provider,
+		UserToken:  runCtx.UserToken,
+		Namespace:  namespace,
+		Skills:     session.Skills,
+		APIBaseURL: runCtx.APIBaseURL,
+	}, func(ev AgentEvent) {
+		if ev.Kind == "final" {
+			final.WriteString(ev.Text)
+		}
+		emit(ev)
+	})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(final.String()) != "" {
+		if err := s.agentStore.AppendMessage(ctx, session.ID, AgentMessage{Role: "assistant", Content: final.String()}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newChatHTTPRequest(ctx context.Context, provider Provider, req ChatRequest, stream bool) (*http.Request, error) {

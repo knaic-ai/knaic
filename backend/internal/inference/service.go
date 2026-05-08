@@ -38,7 +38,7 @@ const (
 )
 
 type Service struct {
-	typed     kubernetes.Interface         // optional: enables ConfigMap-based defaults
+	typed     kubernetes.Interface // optional: enables ConfigMap-based defaults
 	dyn       dynamic.Interface
 	discovery discovery.DiscoveryInterface // optional: enables Knative/ModelMesh probe
 }
@@ -91,15 +91,7 @@ func (s *Service) CreateService(ctx context.Context, namespace string, req Creat
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
-	if req.Replicas == 0 {
-		req.Replicas = 1
-	}
-	if req.CPULimit == "" {
-		req.CPULimit = req.CPURequest
-	}
-	if req.MemoryLimit == "" {
-		req.MemoryLimit = req.MemoryRequest
-	}
+	normaliseServiceRequest(&req)
 	switch req.Kind {
 	case "InferenceService", "":
 		return s.createInferenceService(ctx, namespace, req)
@@ -111,6 +103,11 @@ func (s *Service) CreateService(ctx context.Context, namespace string, req Creat
 }
 
 func (s *Service) createInferenceService(ctx context.Context, namespace string, req CreateServiceRequest) (*unstructured.Unstructured, error) {
+	obj := inferenceServiceObject(namespace, req)
+	return s.dyn.Resource(gvrInferenceService).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+}
+
+func inferenceServiceObject(namespace string, req CreateServiceRequest) *unstructured.Unstructured {
 	model := map[string]any{
 		"modelFormat": map[string]any{"name": "huggingface"},
 		"runtime":     req.Runtime,
@@ -157,10 +154,15 @@ func (s *Service) createInferenceService(ctx context.Context, namespace string, 
 			},
 		},
 	}
-	return s.dyn.Resource(gvrInferenceService).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+	return obj
 }
 
 func (s *Service) createLLMInferenceService(ctx context.Context, namespace string, req CreateServiceRequest) (*unstructured.Unstructured, error) {
+	obj := llmInferenceServiceObject(namespace, req)
+	return s.dyn.Resource(gvrLLMInferenceService).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+}
+
+func llmInferenceServiceObject(namespace string, req CreateServiceRequest) *unstructured.Unstructured {
 	// LLMInferenceService spec (per the live CRD): {model, replicas,
 	// baseRefs, template, worker, prefill, parallelism, router,
 	// storageInitializer}. There is NO runtimeRef — that's an InferenceService
@@ -237,7 +239,72 @@ func (s *Service) createLLMInferenceService(ctx context.Context, namespace strin
 			"spec": spec,
 		},
 	}
-	return s.dyn.Resource(gvrLLMInferenceService).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+	return obj
+}
+
+func normaliseServiceRequest(req *CreateServiceRequest) {
+	if req.Replicas == 0 {
+		req.Replicas = 1
+	}
+	if req.CPULimit == "" {
+		req.CPULimit = req.CPURequest
+	}
+	if req.MemoryLimit == "" {
+		req.MemoryLimit = req.MemoryRequest
+	}
+}
+
+// UpdateService rewrites form-owned fields for an existing InferenceService
+// or LLMInferenceService while preserving identity and unrelated metadata.
+func (s *Service) UpdateService(ctx context.Context, namespace, name string, req CreateServiceRequest) (*unstructured.Unstructured, error) {
+	if name == "" {
+		return nil, errors.New("name is required")
+	}
+	if req.Kind == "" {
+		req.Kind = "InferenceService"
+	}
+	normaliseServiceRequest(&req)
+	req.Name = name
+	gvr, err := gvrFor(req.Kind)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := s.dyn.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var desired *unstructured.Unstructured
+	switch req.Kind {
+	case "InferenceService":
+		desired = inferenceServiceObject(namespace, req)
+	case "LLMInferenceService":
+		desired = llmInferenceServiceObject(namespace, req)
+	default:
+		return nil, fmt.Errorf("unknown kind %q", req.Kind)
+	}
+	labels := cur.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	for k, v := range desired.GetLabels() {
+		labels[k] = v
+	}
+	cur.SetLabels(labels)
+
+	annos := cur.GetAnnotations()
+	if annos == nil {
+		annos = map[string]string{}
+	}
+	if req.Kind == "InferenceService" {
+		if req.DeploymentMode == "" {
+			delete(annos, deploymentModeAnnotation)
+		} else {
+			annos[deploymentModeAnnotation] = req.DeploymentMode
+		}
+	}
+	cur.SetAnnotations(annos)
+	cur.Object["spec"] = desired.Object["spec"]
+	return s.dyn.Resource(gvr).Namespace(namespace).Update(ctx, cur, metav1.UpdateOptions{})
 }
 
 var gvrLLMInferenceServiceConfig = schema.GroupVersionResource{

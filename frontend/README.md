@@ -48,6 +48,10 @@ When auth is enabled, the frontend first probes `/api/v1/whoami`. A `401`
 causes it to fetch `/api/v1/auth/config`, discover the OIDC provider, and start
 Authorization Code + PKCE login at `/auth/callback`.
 
+The Agent playground calls the backend session APIs and runs through the
+backend's configured `opencode` executable. For local testing, install
+`opencode` on the backend PATH or set `KNAIC_OPENCODE_BIN`.
+
 For prototype-only mode without backend calls:
 
 ```bash
@@ -64,7 +68,7 @@ VITE_KNAIC_API=disabled npm run dev
 | 4 | Container management | `/containers/{deployments, statefulsets, pods, pvcs}` with logs |
 | 5 | Users & RBAC | `/users`, `/users/roles` — roles, rolebindings, rule editor |
 | 6 | Inference | `/inference/serving-runtimes`, `/inference/services` — built-in vLLM / SGLang runtimes, YAML preview, logs |
-| 7 | LLM Playground | `/playground/{registry, chat, agent}` — cluster auto-discovery + external providers, OpenAI-style streaming, ReAct agent trace |
+| 7 | LLM Playground | `/playground/{registry, chat, agent}` — cluster auto-discovery + external providers, OpenAI-style streaming, opencode-backed read-only agent sessions |
 | 8 | Training | `/training/{runtimes, jobs}` — TrainingRuntime and TrainJob CRUD with progress + logs |
 | 9 | Notebooks | `/notebooks` — Jupyter / VSCode spawners with start/stop |
 | 10 | Theme | aml-fe / `@alauda/ui` tokens applied via Ant Design `ConfigProvider` |

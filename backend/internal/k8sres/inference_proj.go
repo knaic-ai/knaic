@@ -107,10 +107,12 @@ func projectInferenceService(o *unstructured.Unstructured) Projection {
 	// .model first (the form-based form we emit) and fall back to the first
 	// container of the predictor's spec.
 	cpu, mem, gpu, gpuValues := containerResources(model)
+	formSource := model
 	if cpu == "" {
 		if pod, ok, _ := unstructured.NestedMap(o.Object, "spec", "predictor"); ok {
 			if c, found := nestedFirstContainer(pod, "containers"); found {
 				cpu, mem, gpu, gpuValues = containerResources(c)
+				formSource = c
 			}
 		}
 	}
@@ -123,6 +125,7 @@ func projectInferenceService(o *unstructured.Unstructured) Projection {
 	p["minReplicas"] = min
 	p["maxReplicas"] = max
 	p["resources"] = map[string]any{"cpu": cpu, "memory": mem, "gpu": gpu}
+	projectServiceFormFields(p, formSource)
 	if len(gpuValues) > 0 {
 		p["gpuValues"] = gpuValues
 	}
@@ -162,13 +165,28 @@ func projectLLMInferenceService(o *unstructured.Unstructured) Projection {
 	min := replicas
 	max := replicas
 	cpu, mem, gpu, gpuValues := "", "", int64(0), map[string]int64(nil)
+	var formSource map[string]any
 	if c, found := nestedFirstContainer(o.Object, "spec", "template", "containers"); found {
 		cpu, mem, gpu, gpuValues = containerResources(c)
+		formSource = c
+		image, _, _ := unstructured.NestedString(c, "image")
+		if image != "" {
+			p["containerImage"] = image
+		}
 	}
 	if cpu == "" {
 		if model, ok, _ := unstructured.NestedMap(o.Object, "spec", "model"); ok {
 			cpu, mem, gpu, gpuValues = containerResources(model)
+			formSource = model
 		}
+	}
+	modelName, _, _ := unstructured.NestedString(o.Object, "spec", "model", "name")
+	if modelName != "" {
+		p["modelName"] = modelName
+	}
+	baseConfigs := baseRefNames(o)
+	if len(baseConfigs) > 0 {
+		p["baseConfigs"] = baseConfigs
 	}
 	endpoint, _, _ := unstructured.NestedString(o.Object, "status", "url")
 	p["kind"] = "LLMInferenceService"
@@ -177,6 +195,9 @@ func projectLLMInferenceService(o *unstructured.Unstructured) Projection {
 	p["minReplicas"] = min
 	p["maxReplicas"] = max
 	p["resources"] = map[string]any{"cpu": cpu, "memory": mem, "gpu": gpu}
+	if formSource != nil {
+		projectServiceFormFields(p, formSource)
+	}
 	if len(gpuValues) > 0 {
 		p["gpuValues"] = gpuValues
 	}
@@ -185,6 +206,82 @@ func projectLLMInferenceService(o *unstructured.Unstructured) Projection {
 	p["stopped"] = stopped
 	p["deploymentMode"] = deploymentMode(o)
 	return p
+}
+
+func projectServiceFormFields(p Projection, obj map[string]any) {
+	cpuRequest := resourceString(obj, "resources", "requests", "cpu")
+	cpuLimit := resourceString(obj, "resources", "limits", "cpu")
+	memoryRequest := resourceString(obj, "resources", "requests", "memory")
+	memoryLimit := resourceString(obj, "resources", "limits", "memory")
+	if cpuRequest != "" {
+		p["cpuRequest"] = cpuRequest
+	}
+	if cpuLimit != "" {
+		p["cpuLimit"] = cpuLimit
+	}
+	if memoryRequest != "" {
+		p["memoryRequest"] = memoryRequest
+	}
+	if memoryLimit != "" {
+		p["memoryLimit"] = memoryLimit
+	}
+	if env := envProjection(obj, "env"); len(env) > 0 {
+		p["env"] = env
+	}
+	if command := stringSliceFromMap(obj, "command"); len(command) > 0 {
+		p["command"] = command
+	}
+	if args := stringSliceFromMap(obj, "args"); len(args) > 0 {
+		p["args"] = args
+	}
+}
+
+func baseRefNames(o *unstructured.Unstructured) []string {
+	refs, _, _ := unstructured.NestedSlice(o.Object, "spec", "baseRefs")
+	out := make([]string, 0, len(refs))
+	for _, raw := range refs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(m, "name")
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func envProjection(obj map[string]any, fields ...string) []map[string]any {
+	raw, _, _ := unstructured.NestedSlice(obj, fields...)
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(m, "name")
+		value, _, _ := unstructured.NestedString(m, "value")
+		if name != "" {
+			out = append(out, map[string]any{"name": name, "value": value})
+		}
+	}
+	return out
+}
+
+func stringSliceFromMap(obj map[string]any, fields ...string) []string {
+	values, _, _ := unstructured.NestedStringSlice(obj, fields...)
+	if len(values) > 0 {
+		return values
+	}
+	raw, _, _ := unstructured.NestedSlice(obj, fields...)
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // containerResources extracts CPU/memory and the full set of accelerator
