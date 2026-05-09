@@ -33,6 +33,7 @@ type Deps struct {
 	UserPrefix      string // optional prefix prepended to the impersonated username
 	Components      *components.Service
 	GPU             *gpu.Service
+	GPUProfiles     *gpu.ProfileStore
 	Registry        *registry.Store
 	K8sRes          *k8sres.Service
 	Admin           *admin.Service
@@ -187,15 +188,22 @@ func NewRouter(d Deps) http.Handler {
 				newMonitoringAPI(d.Monitoring).routes(r)
 			}
 			if d.GPU != nil {
-				gpuAPI := newGPUAPI(newK8sClientSource(d), d.GPU, d.Monitoring)
+				gpuAPI := newGPUAPI(newK8sClientSource(d), d.GPU, d.Monitoring, d.GPUProfiles)
 				// Status: cluster scope is admin-gated by the handler
 				// itself (it picks the SA-backed service for admins and
 				// rejects cluster-wide reads from non-admins via the
 				// impersonating fallback). Namespace scope is open to any
 				// authenticated user with read on pods in that namespace.
 				r.Get("/gpu/status", gpuAPI.status)
+				// GPU profiles: list is open to any authenticated user
+				// (the picker on every workload form reads from here);
+				// CRUD is admin-only.
+				r.Get("/gpu/profiles", gpuAPI.listProfiles)
 				r.Group(func(r chi.Router) {
 					r.Use(auth.RequirePlatformAdmin)
+					r.Post("/gpu/profiles", gpuAPI.createProfile)
+					r.Put("/gpu/profiles/{id}", gpuAPI.updateProfile)
+					r.Delete("/gpu/profiles/{id}", gpuAPI.deleteProfile)
 					// Per-card DCGM utilisation — cluster-wide metrics, admin only.
 					r.Get("/gpu/device-usage", gpuAPI.deviceUsage)
 				})

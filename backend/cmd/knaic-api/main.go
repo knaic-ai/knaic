@@ -108,6 +108,7 @@ func main() {
 	var nbSvc *notebook.Service
 	var trainSvc *training.Service
 	var gpuSvc *gpu.Service
+	var gpuProfiles *gpu.ProfileStore
 	if clients != nil {
 		resSvc = k8sres.NewService(clients.Dynamic, clients.Typed)
 		adminSvc = admin.NewService(clients.Typed)
@@ -115,6 +116,7 @@ func main() {
 		nbSvc = notebook.New(clients.Dynamic, clients.Typed)
 		trainSvc = training.New(clients.Dynamic, training.NewREST())
 		gpuSvc = gpu.New(clients.Typed)
+		gpuProfiles = gpu.NewProfileStore(clients.Typed, cfg.SystemNamespace)
 	}
 	if adminSvc == nil {
 		adminSvc = admin.NewService(nil)
@@ -187,6 +189,7 @@ func main() {
 		UserPrefix:      cfg.OIDCUsernamePrefix,
 		Components:      compSvc,
 		GPU:             gpuSvc,
+		GPUProfiles:     gpuProfiles,
 		Registry:        regStore,
 		K8sRes:          resSvc,
 		Admin:           adminSvc,

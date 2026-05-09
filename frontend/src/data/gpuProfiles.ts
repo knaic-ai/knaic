@@ -1,4 +1,6 @@
 import { createStore, useStore, uid } from './store';
+import { apiEnabled } from '@/api/client';
+import * as api from '@/api/gpu';
 
 export interface GPUProfile {
   id: string;
@@ -17,6 +19,9 @@ export interface GPUProfile {
   builtin: boolean;
 }
 
+// Local fallback list — used in prototype mode (no backend) and as the
+// initial render before /api/v1/gpu/profiles resolves. Keeps the picker
+// usable on a fresh page load.
 const initial: GPUProfile[] = [
   {
     id: uid('gpu'),
@@ -51,10 +56,69 @@ const initial: GPUProfile[] = [
 export const gpuProfilesStore = createStore<GPUProfile[]>(initial);
 export const useGPUProfiles = () => useStore(gpuProfilesStore);
 
-export function addGPUProfile(p: Omit<GPUProfile, 'id' | 'builtin'>) {
+let loaded = false;
+
+function fromDTO(p: api.GPUProfileDTO): GPUProfile {
+  return {
+    id: p.id,
+    name: p.name,
+    kind: p.kind,
+    description: p.description ?? '',
+    fields: p.fields ?? [],
+    builtin: !!p.builtin,
+  };
+}
+
+export function ensureGPUProfilesLoaded() {
+  if (!apiEnabled || loaded) return;
+  loaded = true;
+  api.listGPUProfiles()
+    .then(items => gpuProfilesStore.set(items.map(fromDTO)))
+    .catch(() => {
+      // Fail-soft: keep the local fallback list and let the next call retry.
+      loaded = false;
+    });
+}
+
+export function reloadGPUProfiles() {
+  loaded = false;
+  ensureGPUProfilesLoaded();
+}
+
+// Mutators round-trip through the API in API mode; fall back to in-memory
+// edits in prototype mode so the page stays functional offline.
+
+export async function addGPUProfile(p: Omit<GPUProfile, 'id' | 'builtin'>): Promise<void> {
+  if (apiEnabled) {
+    const created = await api.createGPUProfile({
+      name: p.name,
+      kind: p.kind,
+      description: p.description,
+      fields: p.fields,
+    });
+    gpuProfilesStore.set(prev => [...prev, fromDTO(created)]);
+    return;
+  }
   gpuProfilesStore.set(prev => [...prev, { ...p, id: uid('gpu'), builtin: false }]);
 }
 
-export function removeGPUProfile(id: string) {
+export async function updateGPUProfile(id: string, p: Omit<GPUProfile, 'id' | 'builtin'>): Promise<void> {
+  if (apiEnabled) {
+    const updated = await api.updateGPUProfile(id, {
+      name: p.name,
+      kind: p.kind,
+      description: p.description,
+      fields: p.fields,
+    });
+    gpuProfilesStore.set(prev => prev.map(x => (x.id === id ? fromDTO(updated) : x)));
+    return;
+  }
+  gpuProfilesStore.set(prev => prev.map(x => (x.id === id ? { ...p, id, builtin: false } : x)));
+}
+
+export async function removeGPUProfile(id: string): Promise<void> {
+  if (apiEnabled) {
+    await api.deleteGPUProfile(id);
+  }
   gpuProfilesStore.set(prev => prev.filter(p => p.id !== id));
 }

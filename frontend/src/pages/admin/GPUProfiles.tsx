@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Table, Tag, Space, Button, Modal, Form, Input, InputNumber, Select, App,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import {
-  useGPUProfiles, addGPUProfile, removeGPUProfile, type GPUProfile,
+  useGPUProfiles, addGPUProfile, ensureGPUProfilesLoaded, reloadGPUProfiles, removeGPUProfile, type GPUProfile,
 } from '@/data/gpuProfiles';
+import { useApp } from '@/context/AppContext';
 
 const kindColor: Record<GPUProfile['kind'], string> = {
   hami: 'geekblue',
@@ -16,10 +17,21 @@ const kindColor: Record<GPUProfile['kind'], string> = {
 };
 
 export function GPUProfilesPage() {
+  const { user } = useApp();
   const profiles = useGPUProfiles();
   const { message, modal } = App.useApp();
   const [open, setOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm();
+  // Built-ins load fast, but custom profiles round-trip through a
+  // ConfigMap; trigger the load on mount so the table reflects what
+  // operators have configured cluster-wide.
+  useEffect(() => {
+    ensureGPUProfilesLoaded();
+  }, []);
+  // The backend gates writes to platform admins (auth.RequirePlatformAdmin
+  // on POST/PUT/DELETE); hide the controls for everyone else.
+  const canWrite = user.isPlatformAdmin;
 
   return (
     <div className="knaic-page">
@@ -27,9 +39,14 @@ export function GPUProfilesPage() {
         title="Admin · GPU / accelerator profiles"
         description="Resource templates offered to users when creating inference / train / notebook workloads. Built-in profiles cover HAMi, NVIDIA and Ascend NPU; platform admins can add profiles for new hardware."
         extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setOpen(true); }}>
-            Add profile
-          </Button>
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={() => reloadGPUProfiles()}>Refresh</Button>
+            {canWrite && (
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setOpen(true); }}>
+                Add profile
+              </Button>
+            )}
+          </Space>
         }
       />
       <Table
@@ -66,7 +83,7 @@ export function GPUProfilesPage() {
           {
             title: 'Actions',
             width: 120,
-            render: (_, r) => (
+            render: (_, r) => canWrite ? (
               <Button
                 size="small"
                 danger
@@ -75,14 +92,19 @@ export function GPUProfilesPage() {
                 onClick={() =>
                   modal.confirm({
                     title: `Delete profile ${r.name}?`,
-                    onOk: () => {
-                      removeGPUProfile(r.id);
-                      message.success('Profile removed');
+                    content: 'Workloads that already reference this profile keep working — only new pickers stop offering it.',
+                    onOk: async () => {
+                      try {
+                        await removeGPUProfile(r.id);
+                        message.success('Profile removed');
+                      } catch (e) {
+                        message.error((e as Error).message);
+                      }
                     },
                   })
                 }
               />
-            ),
+            ) : <span className="knaic-sub">—</span>,
           },
         ]}
       />
@@ -92,27 +114,35 @@ export function GPUProfilesPage() {
         onCancel={() => setOpen(false)}
         destroyOnClose
         width={680}
+        confirmLoading={submitting}
         onOk={async () => {
           const v = await form.validateFields();
-          addGPUProfile({
-            name: v.name,
-            kind: v.kind,
-            description: v.description ?? '',
-            fields: (v.fields ?? []).map((f: {
-              key: string; label: string; unit?: string; defaultValue: number; min?: number; max?: number; step?: number;
-            }) => ({
-              key: f.key,
-              label: f.label,
-              unit: f.unit,
-              defaultValue: f.defaultValue,
-              min: f.min,
-              max: f.max,
-              step: f.step,
-            })),
-          });
-          setOpen(false);
-          form.resetFields();
-          message.success(`Profile ${v.name} added`);
+          setSubmitting(true);
+          try {
+            await addGPUProfile({
+              name: v.name,
+              kind: v.kind,
+              description: v.description ?? '',
+              fields: (v.fields ?? []).map((f: {
+                key: string; label: string; unit?: string; defaultValue: number; min?: number; max?: number; step?: number;
+              }) => ({
+                key: f.key,
+                label: f.label,
+                unit: f.unit,
+                defaultValue: f.defaultValue,
+                min: f.min,
+                max: f.max,
+                step: f.step,
+              })),
+            });
+            message.success(`Profile ${v.name} added`);
+            setOpen(false);
+            form.resetFields();
+          } catch (e) {
+            message.error((e as Error).message);
+          } finally {
+            setSubmitting(false);
+          }
         }}
       >
         <Form form={form} layout="vertical" preserve={false} initialValues={{ kind: 'custom' }}>

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/alauda/knaic-backend/internal/auth"
 	"github.com/alauda/knaic-backend/internal/gpu"
 	"github.com/alauda/knaic-backend/internal/monitoring"
@@ -18,10 +20,80 @@ type gpuAPI struct {
 	source     k8sClientSource
 	saService  *gpu.Service // backend-SA backed, used for non-impersonated calls (admin)
 	monitoring *monitoring.Service
+	profiles   *gpu.ProfileStore
 }
 
-func newGPUAPI(source k8sClientSource, saService *gpu.Service, mon *monitoring.Service) *gpuAPI {
-	return &gpuAPI{source: source, saService: saService, monitoring: mon}
+func newGPUAPI(source k8sClientSource, saService *gpu.Service, mon *monitoring.Service, profiles *gpu.ProfileStore) *gpuAPI {
+	return &gpuAPI{source: source, saService: saService, monitoring: mon, profiles: profiles}
+}
+
+// listProfiles returns the cluster's GPU profile catalog. Open to any
+// authenticated user (the picker on every workload-creation form reads
+// from here).
+func (a *gpuAPI) listProfiles(w http.ResponseWriter, r *http.Request) {
+	if a.profiles == nil {
+		writeJSON(w, http.StatusOK, []gpu.Profile{})
+		return
+	}
+	profiles, err := a.profiles.List(r.Context())
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profiles)
+}
+
+// createProfile / updateProfile / deleteProfile are admin-only — gated by
+// auth.RequirePlatformAdmin in the router.
+func (a *gpuAPI) createProfile(w http.ResponseWriter, r *http.Request) {
+	if a.profiles == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "gpu profile store unavailable"})
+		return
+	}
+	var p gpu.Profile
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	out, err := a.profiles.Create(r.Context(), p)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (a *gpuAPI) updateProfile(w http.ResponseWriter, r *http.Request) {
+	if a.profiles == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "gpu profile store unavailable"})
+		return
+	}
+	var p gpu.Profile
+	if err := decodeJSON(r, &p); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	// The id in the URL wins — body id is overwritten so a mismatch can't
+	// rewrite a different profile.
+	p.ID = chi.URLParam(r, "id")
+	out, err := a.profiles.Update(r.Context(), p)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (a *gpuAPI) deleteProfile(w http.ResponseWriter, r *http.Request) {
+	if a.profiles == nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "gpu profile store unavailable"})
+		return
+	}
+	if err := a.profiles.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // status routes the request to the SA-backed service for cluster scope

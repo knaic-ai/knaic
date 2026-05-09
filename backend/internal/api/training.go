@@ -21,7 +21,29 @@ func (a *trainingAPI) routes(r chi.Router) {
 	r.Post("/runtimes", a.createRuntime)
 	r.Post("/jobs", a.createJob)
 	r.Get("/jobs/{name}/mlflow", a.mlflow)
+	// Cancel/Resume map to spec.suspend on the TrainJob — the Trainer v2
+	// controller scales every replicated job to zero replicas without
+	// deleting the object, so resume is a single-toggle away.
+	r.Post("/jobs/{name}/cancel", a.cancelJob)
+	r.Post("/jobs/{name}/resume", a.resumeJob)
 }
+
+func (a *trainingAPI) suspend(w http.ResponseWriter, r *http.Request, suspended bool) {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	obj, err := svc.SuspendJob(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"), suspended)
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, obj.Object)
+}
+
+func (a *trainingAPI) cancelJob(w http.ResponseWriter, r *http.Request) { a.suspend(w, r, true) }
+func (a *trainingAPI) resumeJob(w http.ResponseWriter, r *http.Request) { a.suspend(w, r, false) }
 
 func (a *trainingAPI) createRuntime(w http.ResponseWriter, r *http.Request) {
 	var req training.CreateRuntimeRequest

@@ -67,3 +67,44 @@ export function fetchGPUDeviceUsage(opts: { start?: number; end?: number; step?:
   if (opts.step) p.set('step', String(opts.step));
   return request<GPUDeviceUsage[]>(`/api/v1/gpu/device-usage?${p}`);
 }
+
+// ---- GPU profiles -------------------------------------------------------
+//
+// The picker on every workload-creation form (inference / training /
+// notebook) reads from this catalog. Built-ins ship in code; admins can
+// add custom profiles for new hardware via /admin/gpu-profiles.
+
+export interface GPUProfileField {
+  key: string;
+  label: string;
+  unit?: string;
+  defaultValue: string | number;
+  step?: number;
+  min?: number;
+  max?: number;
+}
+
+export interface GPUProfileDTO {
+  id: string;
+  name: string;
+  kind: 'hami' | 'nvidia' | 'npu' | 'custom';
+  description?: string;
+  fields: GPUProfileField[];
+  builtin: boolean;
+}
+
+export function listGPUProfiles(): Promise<GPUProfileDTO[]> {
+  return request<GPUProfileDTO[]>('/api/v1/gpu/profiles');
+}
+
+export function createGPUProfile(p: Omit<GPUProfileDTO, 'id' | 'builtin'>): Promise<GPUProfileDTO> {
+  return request<GPUProfileDTO>('/api/v1/gpu/profiles', { method: 'POST', body: p });
+}
+
+export function updateGPUProfile(id: string, p: Omit<GPUProfileDTO, 'id' | 'builtin'>): Promise<GPUProfileDTO> {
+  return request<GPUProfileDTO>(`/api/v1/gpu/profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: p });
+}
+
+export function deleteGPUProfile(id: string): Promise<void> {
+  return request<void>(`/api/v1/gpu/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}

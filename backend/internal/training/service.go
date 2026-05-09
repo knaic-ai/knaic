@@ -220,6 +220,22 @@ func (s *Service) CreateJob(ctx context.Context, namespace string, req CreateJob
 	return s.dyn.Resource(gvrJob).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
 }
 
+// SuspendJob flips the trainer.kubeflow.org/v1alpha1 TrainJob's
+// `spec.suspend` flag — the controller scales every replicated job to
+// zero replicas without deleting the object, so the user can resume by
+// setting it back to false. Used by the Cancel/Resume buttons on the
+// Train Jobs page.
+func (s *Service) SuspendJob(ctx context.Context, namespace, name string, suspended bool) (*unstructured.Unstructured, error) {
+	cur, err := s.dyn.Resource(gvrJob).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if err := unstructured.SetNestedField(cur.Object, suspended, "spec", "suspend"); err != nil {
+		return nil, err
+	}
+	return s.dyn.Resource(gvrJob).Namespace(namespace).Update(ctx, cur, metav1.UpdateOptions{})
+}
+
 // MLflowRun returns the recorded run + samples for a TrainJob. If the job
 // has no MLflow annotations, the result is empty (and the UI hides the tab).
 func (s *Service) MLflowRun(ctx context.Context, namespace, name string) (MLflowRun, error) {
