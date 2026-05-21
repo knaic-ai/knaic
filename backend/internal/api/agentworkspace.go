@@ -30,8 +30,7 @@ func newAgentWorkspaceAPI(svc *agentworkspace.Service, grants *auth.GrantStore) 
 }
 
 func (a *agentWorkspaceAPI) routes(r chi.Router) {
-	// GET / POST distinguish "look up existing" vs "ensure created". Same
-	// endpoint shape the cpea frontend hook expects.
+	// GET / POST distinguish "look up existing" vs "ensure created".
 	r.Get("/", a.get)
 	r.Post("/", a.ensure)
 	r.Post("/restart", a.restart)

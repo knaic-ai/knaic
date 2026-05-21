@@ -55,6 +55,29 @@ real deployments.
 - 📦 **Single image**: Go API + React bundle + opencode sidecar all live in
   one container — easy to mirror into air-gapped clusters.
 
+## What knaic does — Agent Workspace
+
+Each user gets a personal **Agent Workspace** — an in-browser coding agent
+(Codex Web) provisioned on first login, backed by a persistent volume. From
+inside that workspace the agent can talk to the knaic API on the user's
+behalf and drive AI training / inference workloads end-to-end:
+
+- **Plan** — translate goals like "fine-tune model X on 4× A100" or "serve
+  LLM Y with autoscaling" into the right KServe `InferenceService`,
+  Kubeflow `TrainJob`, `ServingRuntime`, PVC and quota manifests, without
+  the user hand-authoring YAML.
+- **Schedule** — submit jobs through Volcano / Kueue-style gang scheduling,
+  pack GPU and NPU shards via Hami, and bin-pack inference replicas against
+  the cluster's live capacity. Per-namespace quota and GPU profiles are
+  checked before submission, not after the pod is stuck Pending.
+- **Optimize** — Prometheus, MLflow run metrics, and per-GPU / per-card
+  utilization are all reachable through the same API, so the agent can
+  flag under-used replicas, RAM/VRAM-bound training jobs, and inference
+  services whose tail latency is drifting above target.
+- **Iterate from the browser** — code, configs, notebooks and CLI history
+  live on the workspace's PVC, so the next session picks up exactly where
+  the previous one left off. No local dev environment required.
+
 ## Quick start
 
 ```bash

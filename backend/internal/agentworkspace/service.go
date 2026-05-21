@@ -1,8 +1,8 @@
 // Package agentworkspace provisions a per-user Codex Web pod (Deployment +
-// Service + PVC) and exposes it through a reverse proxy. Adapted from
-// alauda-cpea's internal/workspace, narrowed to the codex-web runtime only and
-// rewired to use a single SA-backed Kubernetes client (so any authenticated
-// caller can provision their own without per-namespace Deployment RBAC).
+// Service + PVC) and exposes it through a reverse proxy. Narrowed to the
+// codex-web runtime and wired to a single SA-backed Kubernetes client, so
+// any authenticated caller can provision their own without per-namespace
+// Deployment RBAC.
 //
 // The workspace is keyed on a stable DNS-safe slug of the caller's OIDC
 // identity (Email > Subject), so first-login auto-creation is idempotent and
@@ -54,8 +54,7 @@ type Options struct {
 	StorageClass     string
 }
 
-// Workspace is the JSON-serializable view returned to the frontend. Mirrors
-// the cpea Workspace shape that the React hook expects.
+// Workspace is the JSON-serializable view returned to the frontend.
 type Workspace struct {
 	Name      string    `json:"name"`
 	Namespace string    `json:"namespace"`
@@ -523,7 +522,7 @@ func normalize(opts Options) Options {
 		opts.Namespace = "knaic-system"
 	}
 	if opts.Image == "" {
-		opts.Image = "ghcr.io/alauda/cpea-codex-web:latest"
+		opts.Image = "ghcr.io/knaic/codex-web:latest"
 	}
 	if opts.Storage == "" {
 		opts.Storage = "40Gi"

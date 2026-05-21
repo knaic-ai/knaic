@@ -1,5 +1,5 @@
-// Per-user Codex Web workspace. Mirrors the cpea Agent Workspace view:
-// embeds the iframe under /api/v1/me/workspace/proxy/, polls the backend
+// Per-user Codex Web workspace. Embeds the runtime iframe under
+// /api/v1/me/workspace/proxy/, polls the backend
 // while the pod is rolling, and exposes Restart + Resize actions in the page
 // toolbar. Provisioning is implicit — the first GET 404 triggers a POST
 // /me/workspace that creates the Deployment + Service + PVC.
