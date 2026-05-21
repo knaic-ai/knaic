@@ -8,27 +8,122 @@
 #
 # `scheme` defaults to "hf" when omitted. `tags` and `modelType` are free-
 # form; the UI groups by `modelType` (llm | embedding | diffusion | …).
+# `collectionId`, `parentModelId` and `derivedKind` are optional; when
+# present the UI groups variants together on the Collections tab and the
+# detail page renders a model tree linking parent ↔ derivatives.
+collections:
+  - id: col-qwen35
+    name: Qwen3.5
+    description: |
+      Alibaba's Qwen3.5 series — chat + base models across multiple sizes,
+      sharing tokenizer and instruction-following alignment.
+    iconColor: "#722ED1"
+  - id: col-llama33
+    name: Llama 3.3
+    description: |
+      Meta's Llama 3.3 release. Instruct variants tuned for general chat
+      and tool-use.
+    iconColor: "#13C2C2"
+  - id: col-sd3
+    name: Stable Diffusion 3
+    description: |
+      Stability AI's Stable Diffusion 3 family of text-to-image diffusion
+      models.
+    iconColor: "#EB2F96"
+
 models:
-  - name: Qwen/Qwen3.5-0.8B
+  - id: seed-qwen35-08b
+    name: Qwen/Qwen3.5-0.8B
     owner: Qwen
     uri: hf-mirror://Qwen/Qwen3.5-0.8B
     scheme: hf
     tags: [text-generation, small]
     modelType: llm
     sizeGB: 1.8
+    collectionId: col-qwen35
     readme: |
       # Qwen3.5 0.8B
 
       Compact Qwen3.5 base model suitable for lightweight inference and
       development environments.
 
-  - name: Qwen/Qwen3.5-7B-Instruct
+  - id: seed-qwen35-08b-math
+    name: Qwen/Qwen3.5-0.8B-Math
+    owner: Qwen
+    uri: hf-mirror://Qwen/Qwen3.5-0.8B-Math
+    scheme: hf
+    tags: [math, finetune]
+    modelType: llm
+    sizeGB: 1.8
+    collectionId: col-qwen35
+    parentModelId: seed-qwen35-08b
+    derivedKind: finetune
+    readme: |
+      # Qwen3.5 0.8B · Math
+
+      Fully fine-tuned variant of Qwen3.5-0.8B on the OpenMathReasoning
+      dataset. Same parameter count as the base model.
+
+  - id: seed-qwen35-08b-awq
+    name: Qwen/Qwen3.5-0.8B-AWQ
+    owner: Qwen
+    uri: hf-mirror://Qwen/Qwen3.5-0.8B-AWQ
+    scheme: hf
+    tags: [quantized, awq, int4]
+    modelType: llm
+    sizeGB: 0.6
+    collectionId: col-qwen35
+    parentModelId: seed-qwen35-08b
+    derivedKind: quantization
+    readme: |
+      # Qwen3.5 0.8B · AWQ Int4
+
+      AWQ-int4 quantization of Qwen3.5-0.8B — about a third of the
+      original safetensors size with comparable benchmark scores.
+
+  - id: seed-qwen35-08b-gguf
+    name: Qwen/Qwen3.5-0.8B-GGUF
+    owner: Qwen
+    uri: hf-mirror://Qwen/Qwen3.5-0.8B-GGUF
+    scheme: hf
+    tags: [quantized, gguf, llama-cpp]
+    modelType: llm
+    sizeGB: 0.5
+    collectionId: col-qwen35
+    parentModelId: seed-qwen35-08b
+    derivedKind: quantization
+    readme: |
+      # Qwen3.5 0.8B · GGUF
+
+      llama.cpp-friendly GGUF quantization of Qwen3.5-0.8B. Ships
+      Q4_K_M, Q5_K_M, Q6_K, and Q8_0 variants in a single repo.
+
+  - id: seed-qwen35-08b-chat-lora
+    name: knaic-examples/qwen3.5-0.8b-helpdesk-lora
+    owner: knaic-examples
+    uri: hf-mirror://knaic-examples/qwen3.5-0.8b-helpdesk-lora
+    scheme: hf
+    tags: [lora, adapter, helpdesk]
+    modelType: llm
+    sizeGB: 0.05
+    collectionId: col-qwen35
+    parentModelId: seed-qwen35-08b
+    derivedKind: adapter
+    readme: |
+      # Qwen3.5 0.8B · Helpdesk LoRA
+
+      LoRA rank-64 adapter fine-tuned on a synthetic helpdesk ticket
+      dataset. Apply on top of the Qwen3.5-0.8B base model.
+
+  - id: seed-qwen35-7b
+    name: Qwen/Qwen3.5-7B-Instruct
     owner: Qwen
     uri: hf-mirror://Qwen/Qwen3.5-7B-Instruct
     scheme: hf
     tags: [chat, instruct, text-generation]
     modelType: llm
     sizeGB: 15.2
+    collectionId: col-qwen35
     readme: |
       # Qwen3.5 7B Instruct
 
@@ -43,29 +138,51 @@ models:
       ## License
       Apache-2.0
 
-  - name: Qwen/Qwen3.5-72B-Instruct
+  - id: seed-qwen35-7b-awq
+    name: Qwen/Qwen3.5-7B-Instruct-AWQ
+    owner: Qwen
+    uri: hf-mirror://Qwen/Qwen3.5-7B-Instruct-AWQ
+    scheme: hf
+    tags: [quantized, awq, int4]
+    modelType: llm
+    sizeGB: 5.4
+    collectionId: col-qwen35
+    parentModelId: seed-qwen35-7b
+    derivedKind: quantization
+    readme: |
+      # Qwen3.5 7B Instruct · AWQ Int4
+
+      AWQ-int4 quantization of Qwen3.5-7B-Instruct, roughly 3× smaller
+      than the original safetensors.
+
+  - id: seed-qwen35-72b
+    name: Qwen/Qwen3.5-72B-Instruct
     owner: Qwen
     uri: hf-mirror://Qwen/Qwen3.5-72B-Instruct
     scheme: hf
     tags: [chat, instruct, flagship]
     modelType: llm
     sizeGB: 146.0
+    collectionId: col-qwen35
     readme: |
       # Qwen3.5 72B Instruct
 
       Flagship instruct model. Requires multi-GPU deployment.
 
-  - name: meta-llama/Llama-3.3-8B-Instruct
+  - id: seed-llama33-8b
+    name: meta-llama/Llama-3.3-8B-Instruct
     owner: meta-llama
     uri: hf-mirror://meta-llama/Llama-3.3-8B-Instruct
     scheme: hf
     tags: [chat, instruct]
     modelType: llm
     sizeGB: 16.8
+    collectionId: col-llama33
     readme: |
       # Llama 3.3 8B Instruct
 
-  - name: BAAI/bge-large-en-v1.5
+  - id: seed-bge-large-en
+    name: BAAI/bge-large-en-v1.5
     owner: BAAI
     uri: hf-mirror://BAAI/bge-large-en-v1.5
     scheme: hf
@@ -77,12 +194,14 @@ models:
 
       General-purpose English embedding model.
 
-  - name: stabilityai/stable-diffusion-3-medium
+  - id: seed-sd3-medium
+    name: stabilityai/stable-diffusion-3-medium
     owner: stabilityai
     uri: hf-mirror://stabilityai/stable-diffusion-3-medium
     scheme: hf
     tags: [image, diffusion]
     modelType: diffusion
     sizeGB: 14.0
+    collectionId: col-sd3
     readme: |
       # Stable Diffusion 3 Medium

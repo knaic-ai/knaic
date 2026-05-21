@@ -40,6 +40,14 @@ func TestChatUsesOpenAICompatibleEndpoint(t *testing.T) {
 	var gotAuth string
 	var gotModel string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The resolver probes /v1/models on first chat to validate that
+		// the configured model name matches what the upstream serves.
+		// Return the configured model so the request body uses it as-is.
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"qwen"}]}`))
+			return
+		}
 		gotAuth = r.Header.Get("Authorization")
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %q", r.URL.Path)
@@ -93,6 +101,11 @@ func TestChatUsesOpenAICompatibleEndpoint(t *testing.T) {
 func TestStreamChatProxiesOpenAICompatibleEvents(t *testing.T) {
 	var gotStream bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"qwen"}]}`))
+			return
+		}
 		var body struct {
 			Stream bool `json:"stream"`
 		}

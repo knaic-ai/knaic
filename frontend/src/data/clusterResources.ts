@@ -1,6 +1,7 @@
 import { createStore, useStore, uid } from './store';
 import { apiEnabled } from '@/api/client';
 import {
+  createNamespacedYaml,
   deleteNamespaced,
   fetchYaml as apiFetchYaml,
   listNamespaced,
@@ -262,6 +263,192 @@ export async function deleteClusterResource(slug: Slug, ns: string, name: string
 export async function fetchClusterResourceYaml(slug: Slug, ns: string, name: string, fallback: string): Promise<string> {
   if (!apiEnabled) return fallback;
   return apiFetchYaml(slug, ns, name);
+}
+
+// extractName pulls `metadata.name` out of a YAML manifest with a regex —
+// good enough for the synthetic-mode optimistic insert below. Anything more
+// would require a YAML parser, and synthetic mode doesn't need fidelity.
+function extractName(yaml: string): string | null {
+  const lines = yaml.split('\n');
+  let inMeta = false;
+  for (const raw of lines) {
+    const line = raw.replace(/#.*$/, '');
+    if (/^metadata\s*:/.test(line)) { inMeta = true; continue; }
+    // metadata is a top-level mapping; once we see another top-level key
+    // (no indentation) we're past it.
+    if (inMeta && /^\S/.test(line) && !/^metadata/.test(line)) inMeta = false;
+    if (inMeta) {
+      const m = line.match(/^\s+name\s*:\s*['"]?([^'"\s]+)/);
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
+// createClusterResource posts the YAML to the backend's generic create
+// endpoint, then refreshes the cached list so the UI shows the new entry.
+// In synthetic mode we append a minimal prototype object keyed by the
+// extracted name so the page reflects the action immediately.
+export async function createClusterResource(slug: Slug, ns: string, yaml: string): Promise<void> {
+  if (apiEnabled) {
+    await createNamespacedYaml(slug, ns, yaml);
+    switch (slug) {
+      case 'services':
+        reloadServices(ns);
+        break;
+      case 'configmaps':
+        reloadConfigMaps(ns);
+        break;
+      case 'secrets':
+        reloadSecrets(ns);
+        break;
+      case 'gateways':
+      case 'httproutes':
+        reloadGateways(ns);
+        break;
+      default:
+        break;
+    }
+    return;
+  }
+  // Synthetic / prototype mode — push a minimal stub so the table updates.
+  const name = extractName(yaml) ?? `new-${Date.now().toString(36)}`;
+  const created = nowDate();
+  switch (slug) {
+    case 'services':
+      k8sServicesStore.set(prev => [
+        {
+          id: uid('svc'),
+          name,
+          namespace: ns,
+          type: 'ClusterIP',
+          clusterIP: '10.96.0.0',
+          ports: [],
+          selector: {},
+          createdAt: created,
+        },
+        ...prev,
+      ]);
+      break;
+    case 'configmaps':
+      configMapsStore.set(prev => [
+        { id: uid('cm'), name, namespace: ns, data: {}, createdAt: created },
+        ...prev,
+      ]);
+      break;
+    case 'secrets':
+      secretsStore.set(prev => [
+        { id: uid('sec'), name, namespace: ns, type: 'Opaque', keys: [], createdAt: created },
+        ...prev,
+      ]);
+      break;
+    case 'gateways':
+      gatewaysStore.set(prev => [
+        {
+          id: uid('gw'),
+          name,
+          namespace: ns,
+          gatewayClassName: 'envoy',
+          listeners: [],
+          addresses: [],
+          status: 'Pending',
+          createdAt: created,
+        },
+        ...prev,
+      ]);
+      break;
+    case 'httproutes':
+      httpRoutesStore.set(prev => [
+        { id: uid('hr'), name, namespace: ns, parentGateway: '', hostnames: [], rules: [], createdAt: created },
+        ...prev,
+      ]);
+      break;
+    default:
+      break;
+  }
+}
+
+// Templates pre-populate the YAML editor so users see a valid manifest they
+// can tweak rather than a blank canvas. Each builds a minimum-viable spec
+// for the {ns} the page is currently scoped to.
+export function configMapTemplate(ns: string): string {
+  return `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: example-config
+  namespace: ${ns}
+data:
+  app.properties: |
+    key=value
+`;
+}
+
+export function secretTemplate(ns: string): string {
+  return `apiVersion: v1
+kind: Secret
+metadata:
+  name: example-secret
+  namespace: ${ns}
+type: Opaque
+stringData:
+  username: admin
+  password: changeme
+`;
+}
+
+export function serviceTemplate(ns: string): string {
+  return `apiVersion: v1
+kind: Service
+metadata:
+  name: example-service
+  namespace: ${ns}
+spec:
+  type: ClusterIP
+  selector:
+    app: example
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+`;
+}
+
+export function gatewayTemplate(ns: string): string {
+  return `apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: example-gateway
+  namespace: ${ns}
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+`;
+}
+
+export function httpRouteTemplate(ns: string): string {
+  return `apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: example-route
+  namespace: ${ns}
+spec:
+  parentRefs:
+    - name: example-gateway
+  hostnames:
+    - example.${ns}.knaic.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: example-service
+          port: 80
+`;
 }
 
 export function buildServiceYaml(s: K8sService): string {

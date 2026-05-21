@@ -6,14 +6,39 @@ import { request } from './client';
 import { listNamespaced } from './k8sres';
 import type { TrainingRuntime, TrainJob } from '@/data/training';
 
+export interface RuntimePreJob {
+  name: string;
+  image: string;
+  command?: string[];
+  args?: string[];
+  env?: { name: string; value: string }[];
+}
+
 export interface CreateRuntimeRequest {
   name: string;
   framework: string;
   image: string;
   numNodes: number;
+
+  // Trainer container — image already declared above; these mirror the
+  // CreateJobRequest fields so the runtime can ship sensible defaults the
+  // TrainJob can override.
+  command?: string[];
+  args?: string[];
+  env?: { name: string; value: string }[];
+
+  // Resources are now request/limit pairs (InferenceRuntime-style) and a
+  // GPU values map indexed by resource key.
+  cpuRequest?: string;
   cpuLimit?: string;
+  memoryRequest?: string;
   memoryLimit?: string;
-  gpuLimit?: number;
+  gpuValues?: Record<string, number>;
+
+  // Pre-training jobs — each becomes a sibling replicatedJob with a
+  // dependsOn chain in the order given. The trainer depends on the last
+  // pre-job.
+  preJobs?: RuntimePreJob[];
 }
 
 export interface CreateJobRequest {

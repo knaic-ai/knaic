@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 type AgentMessage struct {
@@ -52,13 +52,21 @@ type AgentEvent struct {
 }
 
 type AgentRunnerRequest struct {
-	SessionID  string
-	Message    string
-	Provider   Provider
-	UserToken  string
-	Namespace  string
-	Skills     []string
-	APIBaseURL string
+	// SessionID is the knaic AgentSession id ("agent-…"). It identifies the
+	// row a runner can update — e.g. to record an opencode-assigned session
+	// id via AgentStore.SetOpenCodeSession.
+	SessionID string
+	// OpenCodeSession, when non-empty, is the opencode-server "ses_…" id
+	// from a previous turn. Runners reuse it to continue the same opencode
+	// session and inherit its in-server message history. Empty means
+	// "allocate a fresh one".
+	OpenCodeSession string
+	Message         string
+	Provider        Provider
+	UserToken       string
+	Namespace       string
+	Skills          []string
+	APIBaseURL      string
 }
 
 type AgentRunner interface {
@@ -70,6 +78,10 @@ type AgentStore interface {
 	CreateSession(ctx context.Context, s AgentSession) (AgentSession, error)
 	GetSession(ctx context.Context, owner, id string) (AgentSession, error)
 	DeleteSession(ctx context.Context, owner, id string) error
+	// SetOpenCodeSession persists the opencode-assigned session id ("ses_…")
+	// on first contact so subsequent turns reuse the same opencode session
+	// and inherit its in-memory message history.
+	SetOpenCodeSession(ctx context.Context, sessionID, openCodeID string) error
 	AppendMessage(ctx context.Context, sessionID string, msg AgentMessage) error
 }
 

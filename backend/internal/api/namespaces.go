@@ -6,9 +6,9 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/alauda/knaic-backend/internal/admin"
-	"github.com/alauda/knaic-backend/internal/auth"
-	"github.com/alauda/knaic-backend/internal/k8s"
+	"github.com/knaic/knaic-backend/internal/admin"
+	"github.com/knaic/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/k8s"
 )
 
 // newMyNamespacesHandler returns the lightweight namespace list scoped to the

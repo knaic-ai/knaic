@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Select, Space, Tag, Statistic, Empty } from 'antd';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area,
@@ -6,6 +6,12 @@ import {
 import { PageHeader } from '@/components/PageHeader';
 import { useApp } from '@/context/AppContext';
 import { useTrainJobs } from '@/data/training';
+import { syntheticMode } from '@/api/client';
+import {
+  queryTrainingMonitoring,
+  type MonitoringBundle,
+  type MonitoringSource,
+} from '@/api/monitoring';
 
 interface TrainPoint {
   t: string;
@@ -26,6 +32,9 @@ function seed(s: string) {
   };
 }
 
+// buildTrainSeries is the local synthetic fallback used when synthetic mode
+// is on (VITE_KNAIC_SYNTHETIC) or the backend call fails. The shape matches
+// the previous in-frontend mock so dev mode looks identical.
 function buildTrainSeries(jobId: string, points = 36): TrainPoint[] {
   const rand = seed(jobId);
   const data: TrainPoint[] = [];
@@ -47,13 +56,82 @@ function buildTrainSeries(jobId: string, points = 36): TrainPoint[] {
   return data;
 }
 
+function bundleToPoints(bundle: MonitoringBundle): TrainPoint[] {
+  const keys: (keyof Omit<TrainPoint, 't'>)[] = [
+    'gpuUtil',
+    'gpuMemGiB',
+    'hostCpu',
+    'hostMemGiB',
+    'netRxMiB',
+    'netTxMiB',
+  ];
+  let axis: string[] = [];
+  for (const k of keys) {
+    const s = bundle.series[k];
+    if (s && s.points.length > axis.length) axis = s.points.map(p => p.t);
+  }
+  return axis.map((t, i) => {
+    const row: TrainPoint = {
+      t,
+      gpuUtil: 0,
+      gpuMemGiB: 0,
+      hostCpu: 0,
+      hostMemGiB: 0,
+      netRxMiB: 0,
+      netTxMiB: 0,
+    };
+    for (const k of keys) {
+      const v = bundle.series[k]?.points[i]?.v;
+      if (typeof v === 'number') row[k] = v;
+    }
+    return row;
+  });
+}
+
+const sourceColor: Record<MonitoringSource | 'fallback', string> = {
+  prometheus: 'green',
+  synthetic: 'gold',
+  fallback: 'orange',
+};
+
 export function TrainMonitoring() {
   const { namespace } = useApp();
   const jobs = useTrainJobs();
   const nsJobs = useMemo(() => jobs.filter(j => j.namespace === namespace), [jobs, namespace]);
   const [selectedId, setSelectedId] = useState<string | undefined>(nsJobs[0]?.id);
   const selected = nsJobs.find(j => j.id === selectedId) ?? nsJobs[0];
-  const series = useMemo(() => (selected ? buildTrainSeries(selected.id) : []), [selected]);
+  const [series, setSeries] = useState<TrainPoint[]>([]);
+  const [source, setSource] = useState<MonitoringSource | 'fallback'>(
+    syntheticMode ? 'synthetic' : 'prometheus',
+  );
+
+  useEffect(() => {
+    if (!selected) {
+      setSeries([]);
+      return;
+    }
+    if (syntheticMode) {
+      setSeries(buildTrainSeries(selected.id));
+      setSource('synthetic');
+      return;
+    }
+    let cancelled = false;
+    queryTrainingMonitoring({ namespace: selected.namespace, job: selected.name })
+      .then(bundle => {
+        if (cancelled) return;
+        setSeries(bundleToPoints(bundle));
+        setSource(bundle.source);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSeries(buildTrainSeries(selected.id));
+        setSource('fallback');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
   const last = series[series.length - 1];
 
   if (nsJobs.length === 0) {
@@ -93,6 +171,7 @@ export function TrainMonitoring() {
             </Tag>
           )}
           <Tag>Step 5m · last 3h</Tag>
+          <Tag color={sourceColor[source]}>{source}</Tag>
         </Space>
       </Card>
 

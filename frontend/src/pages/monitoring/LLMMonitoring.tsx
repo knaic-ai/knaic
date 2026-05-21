@@ -6,6 +6,12 @@ import {
 import { PageHeader } from '@/components/PageHeader';
 import { useApp } from '@/context/AppContext';
 import { ensureInferenceServicesLoaded, useInferenceServices } from '@/data/inference';
+import { syntheticMode } from '@/api/client';
+import {
+  queryLLMMonitoring,
+  type MonitoringBundle,
+  type MonitoringSource,
+} from '@/api/monitoring';
 
 interface LLMPoint {
   t: string;
@@ -18,6 +24,9 @@ interface LLMPoint {
   p99: number;
 }
 
+// seed/buildLLMSeries are the synthetic fallback used when VITE_KNAIC_SYNTHETIC
+// is on or the backend call fails. They reproduce the prior in-frontend mock
+// shape exactly so dev mode looks identical to before this page hit the API.
 function seed(s: string) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
@@ -55,6 +64,47 @@ function buildLLMSeries(serviceId: string, points = 36): LLMPoint[] {
   return data;
 }
 
+// bundleToPoints zips the named per-metric series the backend returns into
+// the row-shaped LLMPoint[] the recharts components want. Series for missing
+// metrics fall back to empty arrays — shorter series get padded with zeros
+// so charts still render on partial Prometheus configs.
+function bundleToPoints(bundle: MonitoringBundle): LLMPoint[] {
+  const keys: (keyof Omit<LLMPoint, 't'>)[] = [
+    'tokensPerSec',
+    'promptTokens',
+    'completionTokens',
+    'rps',
+    'p50',
+    'p95',
+    'p99',
+  ];
+  // The time axis comes from whichever series came back longest. They all
+  // share the same step on the backend, but a missing metric returns an
+  // empty array and we want the chart to still render the populated ones.
+  let axis: string[] = [];
+  for (const k of keys) {
+    const s = bundle.series[k];
+    if (s && s.points.length > axis.length) axis = s.points.map(p => p.t);
+  }
+  return axis.map((t, i) => {
+    const row: LLMPoint = {
+      t,
+      tokensPerSec: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      rps: 0,
+      p50: 0,
+      p95: 0,
+      p99: 0,
+    };
+    for (const k of keys) {
+      const v = bundle.series[k]?.points[i]?.v;
+      if (typeof v === 'number') row[k] = v;
+    }
+    return row;
+  });
+}
+
 const kindLabel: Record<'LLMInferenceService' | 'InferenceService', string> = {
   LLMInferenceService: 'LLM',
   InferenceService: 'Classic',
@@ -65,9 +115,19 @@ const kindColor: Record<'LLMInferenceService' | 'InferenceService', string> = {
   InferenceService: 'purple',
 };
 
+const sourceColor: Record<MonitoringSource | 'fallback', string> = {
+  prometheus: 'green',
+  synthetic: 'gold',
+  fallback: 'orange',
+};
+
 export function LLMMonitoring() {
   const { namespace } = useApp();
   const services = useInferenceServices();
+  const [series, setSeries] = useState<LLMPoint[]>([]);
+  const [source, setSource] = useState<MonitoringSource | 'fallback'>(
+    syntheticMode ? 'synthetic' : 'prometheus',
+  );
 
   useEffect(() => {
     ensureInferenceServicesLoaded(namespace);
@@ -93,7 +153,35 @@ export function LLMMonitoring() {
     }
   }, [inferenceServices, selectedId]);
   const selected = inferenceServices.find(s => s.id === selectedId) ?? inferenceServices[0];
-  const series = useMemo(() => (selected ? buildLLMSeries(selected.id) : []), [selected]);
+
+  useEffect(() => {
+    if (!selected) {
+      setSeries([]);
+      return;
+    }
+    if (syntheticMode) {
+      setSeries(buildLLMSeries(selected.id));
+      setSource('synthetic');
+      return;
+    }
+    let cancelled = false;
+    queryLLMMonitoring({ namespace: selected.namespace, service: selected.name })
+      .then(bundle => {
+        if (cancelled) return;
+        setSeries(bundleToPoints(bundle));
+        setSource(bundle.source);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Backend unreachable / errored — fall back to local synthetic so
+        // the page still renders something rather than an empty grid.
+        setSeries(buildLLMSeries(selected.id));
+        setSource('fallback');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
 
   const last = series[series.length - 1];
   const avg = (key: keyof LLMPoint) =>
@@ -148,6 +236,7 @@ export function LLMMonitoring() {
           )}
           <Tag color="default">{selected?.modelUri}</Tag>
           <Tag>Step 5m · last 3h</Tag>
+          <Tag color={sourceColor[source]}>{source}</Tag>
         </Space>
       </Card>
 

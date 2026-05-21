@@ -11,7 +11,14 @@ import {
   useProviders,
   type LLMProvider,
 } from '@/data/playground';
-import { ensureInferenceServicesLoaded, useInferenceServices } from '@/data/inference';
+import {
+  ensureInferenceServicesLoaded,
+  ensureRuntimesLoaded,
+  isOpenAICompatibleService,
+  openAIBaseURL,
+  useInferenceServices,
+  useRuntimes,
+} from '@/data/inference';
 import { useApp } from '@/context/AppContext';
 import { apiEnabled } from '@/api/client';
 import { streamChat } from '@/api/playground';
@@ -21,6 +28,7 @@ export function LLMRegistry() {
   const { message, modal } = App.useApp();
   const providers = useProviders();
   const services = useInferenceServices();
+  const runtimes = useRuntimes();
   const [open, setOpen] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [form] = Form.useForm();
@@ -34,24 +42,57 @@ export function LLMRegistry() {
   useEffect(() => {
     ensureProvidersLoaded(namespace);
     ensureInferenceServicesLoaded(namespace);
+    // Runtimes are needed to resolve InferenceService.runtime (a name) to a
+    // family — see isOpenAICompatibleService for the lookup.
+    ensureRuntimesLoaded(namespace);
   }, [namespace]);
 
   async function discover() {
-    const fresh = services
-      .filter(s => s.kind === 'LLMInferenceService')
-      .map<LLMProvider>(s => ({
+    // Surface every InferenceService / LLMInferenceService whose serving
+    // runtime exposes the OpenAI chat/completions API. KServe's status.url
+    // typically omits /v1, so openAIBaseURL appends it for the proxy to
+    // hit `${url}/chat/completions` correctly.
+    //
+    // Skip entries whose status hasn't populated the URL yet (Progressing
+    // services have empty status.url) or where the model identifier can't
+    // be derived — the backend rejects providers missing endpoint/model
+    // with a 400, which would abort the whole batch and surface as an
+    // opaque "name, endpoint and model are required" toast.
+    const candidates = services.filter(s => isOpenAICompatibleService(s, runtimes));
+    const skipped: string[] = [];
+    const fresh: LLMProvider[] = [];
+    for (const s of candidates) {
+      const endpoint = openAIBaseURL(s.endpoint);
+      // Default to the InferenceService name — that's what the vLLM /
+      // SGLang ServingRuntime templates pass as `--served-model-name`,
+      // and it's what the upstream advertises at /v1/models. modelUri
+      // (e.g. "hf://Qwen/Qwen3.5-0.5B") is the storage location, not the
+      // served-model-name; using it makes the upstream return 404. The
+      // backend proxy still validates against /v1/models and substitutes
+      // when this guess turns out wrong.
+      const model = (s.modelName || s.name || '').trim();
+      if (!endpoint || !model || !s.name) {
+        skipped.push(s.name || s.id);
+        continue;
+      }
+      fresh.push({
         id: `discovered-${s.id}`,
         name: `${s.name} (cluster)`,
         source: 'cluster',
         namespace: s.namespace,
-        endpoint: s.endpoint,
-        model: s.modelUri.replace(/^hf:\/\//, ''),
-        description: `Auto-discovered from LLMInferenceService ${s.name}`,
+        endpoint,
+        model,
+        description: `Auto-discovered from ${s.kind} ${s.name}`,
         status: s.status,
-      }));
+      });
+    }
     try {
       await replaceClusterProviders(fresh.map(({ id: _id, ...p }) => p), namespace);
-      message.success(`Re-synced ${fresh.length} in-cluster LLM services`);
+      const summary = skipped.length
+        ? `Re-synced ${fresh.length} services; skipped ${skipped.length} with no endpoint/model yet (${skipped.slice(0, 3).join(', ')}${skipped.length > 3 ? '…' : ''})`
+        : `Re-synced ${fresh.length} in-cluster LLM services`;
+      if (skipped.length) message.warning(summary);
+      else message.success(summary);
     } catch (err) {
       message.error(err instanceof Error ? err.message : 'Failed to sync providers');
     }
@@ -95,7 +136,7 @@ export function LLMRegistry() {
     <div className="knaic-page">
       <PageHeader
         title="LLM service registry"
-        description="LLMs that the playground and agent can call. Cluster-sourced entries mirror LLMInferenceServices; external entries let you plug in OpenAI / Anthropic / etc."
+        description="LLMs that the playground and agent can call. Cluster-sourced entries mirror any LLMInferenceService or InferenceService whose runtime (vLLM / SGLang / TGI / llama.cpp / LMDeploy) exposes the OpenAI chat/completions API. External entries let you plug in OpenAI / Anthropic / etc."
         extra={
           <Space>
             <Button icon={<SyncOutlined />} onClick={discover}>

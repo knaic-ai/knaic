@@ -2,13 +2,14 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/alauda/knaic-backend/internal/auth"
-	"github.com/alauda/knaic-backend/internal/monitoring"
+	"github.com/knaic/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/monitoring"
 )
 
 type monitoringAPI struct {
@@ -21,6 +22,8 @@ func newMonitoringAPI(svc *monitoring.Service) *monitoringAPI {
 
 func (a *monitoringAPI) routes(r chi.Router) {
 	r.Get("/monitoring/query", a.query)
+	r.Get("/monitoring/llm", a.llm)
+	r.Get("/monitoring/training", a.training)
 }
 
 func (a *monitoringAPI) query(w http.ResponseWriter, r *http.Request) {
@@ -68,4 +71,55 @@ func (a *monitoringAPI) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, series)
+}
+
+func (a *monitoringAPI) llm(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	req := monitoring.LLMRequest{
+		Namespace: q.Get("namespace"),
+		Service:   q.Get("service"),
+	}
+	parseRange(q, &req.Start, &req.End, &req.Step)
+	bundle, err := a.svc.QueryLLM(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, bundle)
+}
+
+func (a *monitoringAPI) training(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	req := monitoring.TrainRequest{
+		Namespace: q.Get("namespace"),
+		Job:       q.Get("job"),
+	}
+	parseRange(q, &req.Start, &req.End, &req.Step)
+	bundle, err := a.svc.QueryTraining(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, bundle)
+}
+
+// parseRange reads the standard start/end/step query params used by every
+// monitoring endpoint, leaving the destinations untouched on missing or
+// malformed values so the service applies its defaults.
+func parseRange(q url.Values, start, end *time.Time, step *time.Duration) {
+	if v := q.Get("start"); v != "" {
+		if unix, err := strconv.ParseInt(v, 10, 64); err == nil {
+			*start = time.Unix(unix, 0)
+		}
+	}
+	if v := q.Get("end"); v != "" {
+		if unix, err := strconv.ParseInt(v, 10, 64); err == nil {
+			*end = time.Unix(unix, 0)
+		}
+	}
+	if v := q.Get("step"); v != "" {
+		if seconds, err := strconv.ParseInt(v, 10, 64); err == nil && seconds > 0 {
+			*step = time.Duration(seconds) * time.Second
+		}
+	}
 }

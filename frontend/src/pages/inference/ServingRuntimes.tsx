@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Table, Tag, Space, Button, App, Dropdown } from 'antd';
-import { PlusOutlined, DeleteOutlined, CodeOutlined, EditOutlined, MoreOutlined } from '@ant-design/icons';
+import {
+  PlusOutlined,
+  DeleteOutlined,
+  CodeOutlined,
+  EditOutlined,
+  MoreOutlined,
+  ImportOutlined,
+} from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import {
   useRuntimes,
@@ -16,6 +23,7 @@ import { useApp } from '@/context/AppContext';
 import { YamlViewer } from '@/components/YamlViewer';
 import { YamlEditor } from '@/components/YamlEditor';
 import { NewServingRuntimeModal } from './NewServingRuntimeModal';
+import { ImportClusterRuntimeModal } from './ImportClusterRuntimeModal';
 
 export function ServingRuntimesPage() {
   const { namespace } = useApp();
@@ -23,6 +31,7 @@ export function ServingRuntimesPage() {
   const all = useRuntimes();
   const data = useMemo(() => all.filter(r => r.namespace === namespace || r.builtin), [all, namespace]);
   const [modalOpen, setModalOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<ServingRuntime | null>(null);
   const [yaml, setYaml] = useState<{ sr: ServingRuntime; text: string } | null>(null);
   const [yamlEdit, setYamlEdit] = useState<{ sr: ServingRuntime; text: string } | null>(null);
@@ -94,6 +103,12 @@ export function ServingRuntimesPage() {
         extra={
           <Space>
             <Button onClick={() => reloadRuntimes(namespace)}>Refresh</Button>
+            <Button
+              icon={<ImportOutlined />}
+              onClick={() => setImportOpen(true)}
+            >
+              Import from ClusterServingRuntime
+            </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
               New runtime
             </Button>
@@ -200,6 +215,12 @@ export function ServingRuntimesPage() {
         namespace={namespace}
         editing={editing}
         onClose={() => setModalOpen(false)}
+      />
+
+      <ImportClusterRuntimeModal
+        open={importOpen}
+        namespace={namespace}
+        onClose={() => setImportOpen(false)}
       />
 
       <YamlViewer

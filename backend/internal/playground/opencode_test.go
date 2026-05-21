@@ -39,8 +39,9 @@ func TestOpenCodeRunnerBuildsReadOnlyAgentCommandAndConfig(t *testing.T) {
 	for _, want := range []string{
 		"opencode",
 		"run",
-		"--format json",
-		"--session agent-session-1",
+		"--format default",
+		"--print-logs",
+		"--log-level INFO",
 		"--agent knaic-readonly",
 		"--model knaic/Qwen/Qwen3.5-7B-Instruct",
 		"summarize cluster health",
@@ -83,9 +84,62 @@ func TestOpenCodeRunnerBuildsReadOnlyAgentCommandAndConfig(t *testing.T) {
 	}
 }
 
-func TestDecodeOpenCodeEventEmitsNestedError(t *testing.T) {
-	ev := decodeOpenCodeEvent(`{"type":"error","error":{"name":"UnknownError","data":{"message":"Command not found"}}}`)
-	if ev.Kind != "error" || ev.Text != "Command not found" {
-		t.Fatalf("event = %#v, want nested error text", ev)
+func TestStreamOpenCodeStdoutEmitsAssistantTextAsFinals(t *testing.T) {
+	stdout := strings.Join([]string{
+		"",
+		"Hello from the agent.",
+		"",
+		"Cluster health is OK.",
+	}, "\n")
+	var raw strings.Builder
+	var events []AgentEvent
+	if err := streamOpenCodeStdout(strings.NewReader(stdout), &raw, func(ev AgentEvent) {
+		events = append(events, ev)
+	}); err != nil {
+		t.Fatalf("streamOpenCodeStdout: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2: %#v", len(events), events)
+	}
+	for _, ev := range events {
+		if ev.Kind != "final" {
+			t.Fatalf("got %s event, want final: %#v", ev.Kind, ev)
+		}
+	}
+	if events[0].Text != "Hello from the agent." || events[1].Text != "Cluster health is OK." {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestStreamOpenCodeStderrSurfacesErrorsAndFiltersNoise(t *testing.T) {
+	stderr := strings.Join([]string{
+		"Performing one time database migration, may take a few minutes...",
+		"sqlite-migration:done",
+		"Database migration complete.",
+		"INFO  2026-05-11T00:00:00 +0ms service=tool.registry status=completed duration=0 grep",
+		"INFO  2026-05-11T00:00:00 +0ms service=bus type=session.status publishing",
+		"INFO  2026-05-11T00:00:01 +1ms service=llm providerID=knaic modelID=x small=false stream",
+		"WARN  2026-05-11T00:00:02 +2ms service=config background dependency install failed",
+		"WARN  2026-05-11T00:00:03 +3ms service=session prompt rejected: upstream 404",
+		"ERROR 2026-05-11T00:00:04 +4ms service=provider getSDK failed",
+	}, "\n")
+	var raw strings.Builder
+	var events []AgentEvent
+	streamOpenCodeStderr(strings.NewReader(stderr), &raw, func(ev AgentEvent) {
+		events = append(events, ev)
+	})
+	// Expect: migration trio dropped, tool.registry + bus dropped, npm-install
+	// WARN dropped, INFO llm + WARN session prompt + ERROR getSDK kept.
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3: %#v", len(events), events)
+	}
+	if events[0].Kind != "thought" || !strings.Contains(events[0].Text, "service=llm") {
+		t.Fatalf("events[0] = %#v, want thought with service=llm", events[0])
+	}
+	if events[1].Kind != "thought" || !strings.Contains(events[1].Text, "upstream 404") {
+		t.Fatalf("events[1] = %#v, want thought with upstream 404", events[1])
+	}
+	if events[2].Kind != "error" || !strings.Contains(events[2].Text, "getSDK failed") {
+		t.Fatalf("events[2] = %#v, want error with getSDK failed", events[2])
 	}
 }

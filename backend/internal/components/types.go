@@ -24,7 +24,6 @@ type ManagedBy string
 
 const (
 	ManagedByKnaic  ManagedBy = "knaic"
-	ManagedByACP    ManagedBy = "ACP"
 	ManagedByOLM    ManagedBy = "OLM"
 	ManagedByManual ManagedBy = "manual"
 )
@@ -52,6 +51,13 @@ type Component struct {
 	Status          Status    `json:"status"`
 	Namespace       string    `json:"namespace"`
 	Images          []string  `json:"images"`
+	// Aliases are additional names the detector should consider when matching
+	// this component against on-cluster artefacts (Helm release chart name,
+	// OLM CSV name). The component's own Name is always tried first;
+	// aliases are a fallback for cases where the canonical knaic identity
+	// diverges from the upstream chart name (e.g. `kf-trainer-v2` ↔
+	// `kubeflow-trainer`).
+	Aliases []string `json:"aliases,omitempty"`
 	ImageSync       SyncState `json:"imageSync"`
 	Notes           string    `json:"notes,omitempty"`
 	ManagedBy       ManagedBy `json:"managedBy,omitempty"`

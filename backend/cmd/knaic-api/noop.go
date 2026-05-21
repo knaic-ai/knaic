@@ -6,7 +6,7 @@ import (
 
 	"helm.sh/helm/v3/pkg/release"
 
-	"github.com/alauda/knaic-backend/internal/components"
+	"github.com/knaic/knaic-backend/internal/components"
 )
 
 // noopHelm is used when the binary is started without a reachable cluster.

@@ -140,7 +140,17 @@ html[data-theme='dark'] .chat-bubble.tool {
 html[data-theme='dark'] .metric-card .l { color: #94a3b8; }
 
 .model-card {
+  /* Stretch every card to fill its grid cell so a row of cards has a
+   * uniform height regardless of how many tags / actions each one
+   * carries. Antd Row defaults to align-items: stretch on its flex
+   * cols, so this is all we need on the card. */
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.model-card > .ant-card-body {
+  flex: 1 1 auto;
 }
 .model-card:hover {
   transform: translateY(-2px);

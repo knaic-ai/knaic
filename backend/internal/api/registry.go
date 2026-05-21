@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/alauda/knaic-backend/internal/registry"
+	"github.com/knaic/knaic-backend/internal/registry"
 )
 
 type registryAPI struct {

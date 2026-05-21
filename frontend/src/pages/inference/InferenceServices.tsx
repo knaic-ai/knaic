@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Tag, Space, Button, App, Tooltip, Dropdown } from 'antd';
+import { useNavigate } from 'react-router-dom';
+import { Alert, Table, Tag, Space, Button, App, Tooltip, Dropdown } from 'antd';
 import {
   PlusOutlined,
   DeleteOutlined,
@@ -11,7 +12,17 @@ import {
   ExpandAltOutlined,
   ShrinkOutlined,
   EditOutlined,
+  ExportOutlined,
   MoreOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltOutlined,
+  ApiOutlined,
+  LineChartOutlined,
+  DesktopOutlined,
+  DatabaseOutlined,
+  RocketOutlined,
+  HddOutlined,
+  DashboardOutlined,
 } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
@@ -31,6 +42,12 @@ import { LogViewer } from '@/components/LogViewer';
 import { YamlViewer } from '@/components/YamlViewer';
 import { YamlEditor } from '@/components/YamlEditor';
 import { NewInferenceServiceModal } from './NewInferenceServiceModal';
+import {
+  fetchGatewayConfig,
+  fetchServiceRouteStatus,
+  type GatewayConfigDTO,
+  type ServiceRouteStatusDTO,
+} from '@/api/inference';
 
 const MODEL_COLUMN_WIDTH = 280;
 const MODEL_TRUNCATE_AFTER = 36;
@@ -84,6 +101,7 @@ function ModelUriCell({ uri }: { uri: string }) {
 export function InferenceServicesPage() {
   const { namespace } = useApp();
   const { message, modal } = App.useApp();
+  const nav = useNavigate();
   const all = useInferenceServices();
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
   const [open, setOpen] = useState(false);
@@ -93,10 +111,45 @@ export function InferenceServicesPage() {
   const [yamlLoading, setYamlLoading] = useState<string | null>(null);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [log, setLog] = useState<InferenceService | null>(null);
+  // Gateway config + per-service route status. Cached cluster-wide; the
+  // per-row chip falls back to "0 routes" when route-status returns an
+  // error (typically because the AI Gateway CRDs are not installed).
+  const [gateway, setGateway] = useState<GatewayConfigDTO | null>(null);
+  const [routeStatuses, setRouteStatuses] = useState<
+    Record<string, ServiceRouteStatusDTO | undefined>
+  >({});
 
   useEffect(() => {
     ensureInferenceServicesLoaded(namespace);
   }, [namespace]);
+
+  useEffect(() => {
+    fetchGatewayConfig().then(setGateway).catch(() => setGateway(null));
+  }, []);
+
+  useEffect(() => {
+    // Per-service route status. Sequential, since the backend already does
+    // cluster-wide list calls for each invocation and we don't want a burst.
+    let cancelled = false;
+    (async () => {
+      const out: Record<string, ServiceRouteStatusDTO | undefined> = {};
+      for (const svc of data) {
+        if (cancelled) return;
+        try {
+          out[`${svc.namespace}/${svc.name}`] = await fetchServiceRouteStatus(
+            svc.namespace,
+            svc.name,
+          );
+        } catch {
+          out[`${svc.namespace}/${svc.name}`] = undefined;
+        }
+      }
+      if (!cancelled) setRouteStatuses(out);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [data.map(d => `${d.namespace}/${d.name}`).join(',')]);
 
   const openYaml = async (svc: InferenceService) => {
     setYamlLoading(svc.name);
@@ -147,6 +200,12 @@ export function InferenceServicesPage() {
           <Space>
             <Button onClick={() => reloadInferenceServices(namespace)}>Refresh</Button>
             <Button
+              icon={<ApiOutlined />}
+              onClick={() => nav('/inference/gateway')}
+            >
+              Gateway
+            </Button>
+            <Button
               type="primary"
               icon={<PlusOutlined />}
               onClick={() => {
@@ -159,12 +218,21 @@ export function InferenceServicesPage() {
           </Space>
         }
       />
+      <GatewayBanner gateway={gateway} />
       <Table
         rowKey="id"
         size="middle"
         dataSource={data}
         columns={[
-          { title: 'Name', dataIndex: 'name', render: v => <b>{v}</b> },
+          {
+            title: 'Name',
+            dataIndex: 'name',
+            render: (v: string, r: InferenceService) => (
+              <a onClick={() => nav(`/inference/services/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}`)}>
+                <b>{v}</b>
+              </a>
+            ),
+          },
           {
             title: 'Kind',
             dataIndex: 'kind',
@@ -185,95 +253,126 @@ export function InferenceServicesPage() {
           { title: 'Replicas', render: (_, r) => r.minReplicas === r.maxReplicas ? r.minReplicas : `${r.minReplicas} – ${r.maxReplicas}` },
           {
             title: 'Resources',
-            render: (_, r) => {
-              const cpuMem = `${r.resources.cpu || '—'} CPU · ${r.resources.memory || '—'}`;
-              if (r.gpuValues && Object.keys(r.gpuValues).length > 0) {
-                // Render each accelerator key on its own line so HAMi-style
-                // composite requests (gpualloc / gpucores / gpumem) all show.
-                return (
-                  <Space direction="vertical" size={0}>
-                    <span>{cpuMem}</span>
-                    {Object.entries(r.gpuValues).map(([k, v]) => (
-                      <span key={k} className="mono" style={{ fontSize: 12 }}>
-                        {k.split('/').pop()}={v}
-                      </span>
-                    ))}
-                  </Space>
-                );
-              }
-              return `${cpuMem} · ${r.resources.gpu > 0 ? `${r.resources.gpu} GPU` : 'no GPU'}`;
-            },
+            render: (_, r) => <ResourceChips svc={r} />,
           },
           { title: 'Status', dataIndex: 'status', render: v => <StatusTag value={v} /> },
-          { title: 'Endpoint', dataIndex: 'endpoint', render: v => <span className="mono">{v}</span> },
+          {
+            title: 'Route',
+            render: (_, r) => {
+              const rs = routeStatuses[`${r.namespace}/${r.name}`];
+              if (!rs) return <Tag>—</Tag>;
+              return (
+                <Space size={4} wrap>
+                  {rs.routes.length > 0 ? (
+                    <Tooltip
+                      title={rs.routes
+                        .map(rt => `${rt.kind} ${rt.namespace}/${rt.name}`)
+                        .join('\n')}
+                    >
+                      <Tag color="green" icon={<ApiOutlined />}>
+                        {rs.routes.length}
+                      </Tag>
+                    </Tooltip>
+                  ) : (
+                    <Tag>0</Tag>
+                  )}
+                  {rs.rateLimits.length > 0 && (
+                    <Tooltip
+                      title={rs.rateLimits
+                        .map(p => `${p.namespace}/${p.name} — ${(p.summaries ?? []).join(', ')}`)
+                        .join('\n')}
+                    >
+                      <Tag color="orange" icon={<ThunderboltOutlined />}>
+                        {rs.rateLimits.map(p => p.summaries?.[0] ?? 'limited').join(', ')}
+                      </Tag>
+                    </Tooltip>
+                  )}
+                </Space>
+              );
+            },
+          },
+          {
+            title: 'Endpoint',
+            dataIndex: 'endpoint',
+            render: (v: string) => <EndpointCell endpoint={v} />,
+          },
           {
             title: 'Actions',
-            width: 320,
+            width: 90,
             render: (_, r) => {
               const isStopped = r.stopped || r.status === 'Stopped';
+              // Everything moves under the overflow menu — keeps the row
+              // narrow and turns the action column into a single click
+              // target. Most users hit Details / Logs / YAML far more
+              // often than Edit or Delete, so they sit at the top.
               return (
-                <Space>
-                  <Button
-                    size="small"
-                    icon={isStopped ? <CaretRightOutlined /> : <PauseOutlined />}
-                    onClick={async () => {
-                      try {
-                        await setInferenceServiceStopped(namespace, r.name, r.kind, !isStopped);
-                        message.success(isStopped ? 'Starting…' : 'Stopping…');
-                      } catch (e) {
-                        message.error((e as Error).message);
-                      }
-                    }}
-                  >
-                    {isStopped ? 'Start' : 'Stop'}
-                  </Button>
-                  <Button size="small" icon={<FileTextOutlined />} onClick={() => setLog(r)}>Logs</Button>
-                  <Button
-                    size="small"
-                    icon={<CodeOutlined />}
-                    loading={yamlLoading === r.name}
-                    onClick={() => openYaml(r)}
-                  >
-                    YAML
-                  </Button>
-                  <Dropdown
-                    trigger={['click']}
-                    menu={{
-                      items: [
-                        { key: 'edit', label: 'Edit', icon: <EditOutlined /> },
-                        { key: 'edit-yaml', label: 'Edit YAML', icon: <EditOutlined /> },
-                        { key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true },
-                      ],
-                      onClick: ({ key }) => {
-                        if (key === 'edit') {
-                          setEditing(r);
-                          setOpen(true);
-                        } else if (key === 'edit-yaml') {
-                          openEditYaml(r);
-                        } else if (key === 'delete') {
-                          modal.confirm({
-                            title: `Delete service ${r.name}?`,
-                            onOk: async () => {
-                              try {
-                                await deleteInferenceService(namespace, r.name, r.kind);
-                                message.success('Service deleted');
-                              } catch (e) {
-                                message.error((e as Error).message);
-                              }
-                            },
-                          });
-                        }
+                <Dropdown
+                  trigger={['click']}
+                  menu={{
+                    items: [
+                      {
+                        key: 'details',
+                        label: 'Details',
+                        icon: <LineChartOutlined />,
                       },
-                    }}
+                      {
+                        key: 'toggle',
+                        label: isStopped ? 'Start' : 'Stop',
+                        icon: isStopped ? <CaretRightOutlined /> : <PauseOutlined />,
+                      },
+                      { key: 'logs', label: 'Logs', icon: <FileTextOutlined /> },
+                      { key: 'yaml', label: 'YAML', icon: <CodeOutlined /> },
+                      { type: 'divider' as const },
+                      { key: 'edit', label: 'Edit', icon: <EditOutlined /> },
+                      { key: 'edit-yaml', label: 'Edit YAML', icon: <EditOutlined /> },
+                      { type: 'divider' as const },
+                      { key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true },
+                    ],
+                    onClick: async ({ key, domEvent }) => {
+                      domEvent.stopPropagation();
+                      if (key === 'details') {
+                        nav(`/inference/services/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}`);
+                      } else if (key === 'toggle') {
+                        try {
+                          await setInferenceServiceStopped(namespace, r.name, r.kind, !isStopped);
+                          message.success(isStopped ? 'Starting…' : 'Stopping…');
+                        } catch (e) {
+                          message.error((e as Error).message);
+                        }
+                      } else if (key === 'logs') {
+                        setLog(r);
+                      } else if (key === 'yaml') {
+                        openYaml(r);
+                      } else if (key === 'edit') {
+                        setEditing(r);
+                        setOpen(true);
+                      } else if (key === 'edit-yaml') {
+                        openEditYaml(r);
+                      } else if (key === 'delete') {
+                        modal.confirm({
+                          title: `Delete service ${r.name}?`,
+                          onOk: async () => {
+                            try {
+                              await deleteInferenceService(namespace, r.name, r.kind);
+                              message.success('Service deleted');
+                            } catch (e) {
+                              message.error((e as Error).message);
+                            }
+                          },
+                        });
+                      }
+                    },
+                  }}
+                >
+                  <Button
+                    size="small"
+                    icon={<MoreOutlined />}
+                    loading={yamlLoading === r.name}
+                    aria-label="Actions"
                   >
-                    <Button
-                      size="small"
-                      icon={<MoreOutlined />}
-                      loading={yamlLoading === r.name}
-                      aria-label="More actions"
-                    />
-                  </Dropdown>
-                </Space>
+                    Actions
+                  </Button>
+                </Dropdown>
               );
             },
           },
@@ -312,5 +411,201 @@ export function InferenceServicesPage() {
         inferenceRef={log ? { namespace: log.namespace, name: log.name, kind: log.kind } : undefined}
       />
     </div>
+  );
+}
+
+// GatewayBanner renders a one-line summary of cluster-wide gateway state
+// above the table. Two rows so the kserve-ingress-gateway status +
+// addresses always read together (the user's "how do I reach my service?"
+// answer), with the cluster-wide CRD/config tags below.
+function GatewayBanner({ gateway }: { gateway: GatewayConfigDTO | null }) {
+  if (!gateway) return null;
+  const configTags: JSX.Element[] = [
+    <Tag
+      key="gw-api"
+      color={gateway.ingressGatewayApiEnabled ? 'green' : 'default'}
+      icon={<SafetyCertificateOutlined />}
+    >
+      Gateway API: {gateway.ingressGatewayApiEnabled ? 'on' : 'off'}
+    </Tag>,
+    <Tag
+      key="aigw"
+      color={gateway.envoyAiGatewayInstalled ? 'blue' : 'default'}
+      icon={<ThunderboltOutlined />}
+    >
+      Envoy AI Gateway: {gateway.envoyAiGatewayInstalled ? 'installed' : 'missing'}
+    </Tag>,
+  ];
+  if (gateway.defaultDeploymentMode) {
+    configTags.push(
+      <Tag key="mode" color="cyan">
+        default mode: {gateway.defaultDeploymentMode}
+      </Tag>,
+    );
+  }
+  const gw = gateway.gateway;
+  const statusColor =
+    gw?.status === 'Accepted' ? 'green' : gw?.status === 'Failed' ? 'red' : 'gold';
+  return (
+    <Alert
+      type={gw?.status === 'Accepted' ? 'success' : gw ? 'warning' : 'info'}
+      showIcon
+      icon={<ExportOutlined />}
+      style={{ marginBottom: 12 }}
+      message={
+        <Space size={8} wrap>
+          <b>kserve-ingress-gateway:</b>
+          {gw ? (
+            <>
+              <Tag color={statusColor}>{gw.status}</Tag>
+              <Tag color="default">
+                <span className="mono">{`${gw.namespace}/${gw.name}`}</span>
+              </Tag>
+              {gw.gatewayClassName && (
+                <Tag color="default">class: {gw.gatewayClassName}</Tag>
+              )}
+              {(gw.addresses ?? []).length > 0 ? (
+                (gw.addresses ?? []).map(addr => (
+                  <Tooltip key={addr} title="Click to copy">
+                    <Tag
+                      color="blue"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() =>
+                        navigator.clipboard.writeText(addr).catch(() => null)
+                      }
+                    >
+                      <span className="mono">{addr}</span>
+                    </Tag>
+                  </Tooltip>
+                ))
+              ) : (
+                <Tag color="gold">no address programmed</Tag>
+              )}
+            </>
+          ) : (
+            <Tag color="default">not installed</Tag>
+          )}
+        </Space>
+      }
+      description={<Space wrap>{configTags}</Space>}
+    />
+  );
+}
+
+// resourceMeta encodes the per-key icon + color for the Resources column.
+// Keys are matched by full resource name (e.g. nvidia.com/gpu) or a unit
+// fallback for arbitrary HAMi-style accelerator keys (gpualloc / gpumem).
+const resourceMeta: Record<string, { color: string; Icon: typeof DesktopOutlined; label: string }> = {
+  cpu: { color: '#2468f2', Icon: DesktopOutlined, label: 'CPU' },
+  memory: { color: '#10b981', Icon: DatabaseOutlined, label: 'Mem' },
+  'nvidia.com/gpu': { color: '#76b900', Icon: RocketOutlined, label: 'GPU' },
+  'amd.com/gpu': { color: '#ed1c24', Icon: RocketOutlined, label: 'GPU' },
+  'huawei.com/Ascend910': { color: '#c7000b', Icon: RocketOutlined, label: 'NPU' },
+};
+
+// resourceFor picks the right icon/color for an arbitrary HAMi-style key
+// (e.g. nvidia.com/gpualloc, nvidia.com/gpumem). The trailing segment of
+// the key drives the label and the icon family.
+function resourceFor(key: string): { color: string; Icon: typeof DesktopOutlined; label: string } {
+  if (resourceMeta[key]) return resourceMeta[key];
+  const suffix = key.split('/').pop() ?? key;
+  if (/mem/i.test(suffix)) {
+    return { color: '#0ea5e9', Icon: HddOutlined, label: suffix };
+  }
+  if (/core|alloc/i.test(suffix)) {
+    return { color: '#f59e0b', Icon: DashboardOutlined, label: suffix };
+  }
+  return { color: '#a855f7', Icon: RocketOutlined, label: suffix };
+}
+
+// ResourceChips renders the per-row resources column with one coloured
+// chip per resource key (CPU, memory, GPU, plus any HAMi sub-keys). The
+// chip stays compact — icon + value — so a row can fit four chips side by
+// side without wrapping.
+function ResourceChips({ svc }: { svc: InferenceService }) {
+  const chips: { key: string; color: string; Icon: typeof DesktopOutlined; label: string; value: string }[] = [];
+  if (svc.resources.cpu) {
+    const m = resourceFor('cpu');
+    chips.push({ key: 'cpu', ...m, value: svc.resources.cpu });
+  }
+  if (svc.resources.memory) {
+    const m = resourceFor('memory');
+    chips.push({ key: 'memory', ...m, value: svc.resources.memory });
+  }
+  // Prefer the structured gpuValues map (HAMi composite resources); fall
+  // back to the legacy resources.gpu integer when not set.
+  if (svc.gpuValues && Object.keys(svc.gpuValues).length > 0) {
+    for (const [k, v] of Object.entries(svc.gpuValues)) {
+      const m = resourceFor(k);
+      chips.push({ key: k, ...m, value: String(v) });
+    }
+  } else if (svc.resources.gpu > 0) {
+    const m = resourceFor('nvidia.com/gpu');
+    chips.push({ key: 'gpu', ...m, value: `${svc.resources.gpu}` });
+  }
+  if (chips.length === 0) {
+    return <span style={{ color: '#999' }}>—</span>;
+  }
+  return (
+    <Space size={4} wrap>
+      {chips.map(c => (
+        <Tooltip key={c.key} title={c.key}>
+          <Tag
+            icon={<c.Icon style={{ color: c.color }} />}
+            style={{
+              background: `${c.color}1A`,
+              borderColor: `${c.color}55`,
+              color: c.color,
+              fontWeight: 600,
+              margin: 0,
+            }}
+          >
+            {c.label} · {c.value}
+          </Tag>
+        </Tooltip>
+      ))}
+    </Space>
+  );
+}
+
+// EndpointCell renders the predictor URL with a copy button. Truncated
+// with ellipsis at the column width so the row stays scannable; the full
+// URL is in the Tooltip and on copy.
+function EndpointCell({ endpoint }: { endpoint: string }) {
+  const { message } = App.useApp();
+  if (!endpoint) return <span style={{ color: '#999' }}>—</span>;
+  return (
+    <Space size={4} style={{ display: 'flex', alignItems: 'center' }}>
+      <Tooltip title={endpoint} placement="topLeft">
+        <span
+          className="mono"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            maxWidth: 220,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            display: 'inline-block',
+            verticalAlign: 'middle',
+            fontSize: 12,
+          }}
+        >
+          {endpoint}
+        </span>
+      </Tooltip>
+      <Button
+        type="text"
+        size="small"
+        icon={<CopyOutlined />}
+        aria-label="Copy endpoint"
+        onClick={() => {
+          navigator.clipboard.writeText(endpoint).then(
+            () => message.success('Endpoint copied'),
+            () => message.error('Copy failed'),
+          );
+        }}
+      />
+    </Space>
   );
 }

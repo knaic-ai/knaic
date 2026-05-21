@@ -57,24 +57,56 @@ func (r *OpenCodeRunner) Run(ctx context.Context, req AgentRunnerRequest, emit f
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	var finalText strings.Builder
-	parseDone := make(chan error, 1)
+	var rawOut strings.Builder
+	var rawErr strings.Builder
+	finals := 0
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan struct{}, 1)
 	go func() {
-		parseDone <- parseOpenCodeEvents(stdout, emit, &finalText)
+		stdoutDone <- streamOpenCodeStdout(stdout, &rawOut, func(ev AgentEvent) {
+			if ev.Kind == "final" {
+				finals++
+			}
+			emit(ev)
+		})
 	}()
-	errText, _ := io.ReadAll(stderr)
-	parseErr := <-parseDone
+	go func() {
+		streamOpenCodeStderr(stderr, &rawErr, emit)
+		stderrDone <- struct{}{}
+	}()
+	parseErr := <-stdoutDone
+	<-stderrDone
 	waitErr := cmd.Wait()
 	if parseErr != nil {
 		return parseErr
 	}
 	if waitErr != nil {
-		return errors.New(strings.TrimSpace(string(errText)) + ": " + waitErr.Error())
+		// Non-zero exit: bubble up stderr (and a stdout tail when stderr is
+		// silent — bun/Node tools sometimes log to stdout under some flags).
+		return errors.New(strings.TrimSpace(firstNonEmpty(tail(rawErr.String(), 2048), tail(rawOut.String(), 2048))) + ": " + waitErr.Error())
 	}
-	if strings.TrimSpace(finalText.String()) == "" {
-		return nil
+	// Exit 0 but no assistant text emitted. Show whatever opencode wrote
+	// (stderr warnings / stdout tail) so the user can see what happened
+	// instead of a blank chat bubble. The streamOpenCodeStderr path
+	// already surfaces WARN/ERROR lines, so this only fires when opencode
+	// is completely silent.
+	if finals == 0 {
+		body := strings.TrimSpace(tail(rawOut.String(), 2048) + "\n" + tail(rawErr.String(), 2048))
+		if body == "" {
+			body = "agent produced no output (opencode exit 0, empty stdout/stderr)"
+		}
+		emit(AgentEvent{Kind: "final", Text: body})
 	}
 	return nil
+}
+
+// tail returns the last n bytes of s, prefixed with an ellipsis when
+// truncated. Used to keep error / fallback output readable in the UI.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
 }
 
 func (r *OpenCodeRunner) PrepareCommand(ctx context.Context, req AgentRunnerRequest) (*exec.Cmd, error) {
@@ -96,10 +128,36 @@ func (r *OpenCodeRunner) PrepareCommand(ctx context.Context, req AgentRunnerRequ
 	}
 
 	model := "knaic/" + req.Provider.Model
+	// We use --format default rather than --format json because opencode
+	// 1.14's JSON event shape (nested {part:{...}}) varies across point
+	// releases and previously slipped past our decoder, leaving the chat
+	// bubble blank. In default mode under non-TTY (our exec.Cmd case)
+	// opencode writes the assistant's finished text directly to stdout
+	// — one chunk per completed message — which is unambiguous to parse.
+	// --print-logs + --log-level INFO routes opencode's internal
+	// stage-by-stage logs to stderr so we can surface them as visible
+	// thoughts (provider getSDK, llm request, mcp register, session
+	// prompt loop, etc.). WARN-level wasn't enough: opencode can
+	// successfully complete a run that produces no assistant text
+	// (e.g. tool-only turn, empty completion) and emit nothing at WARN.
+	// INFO is noisy but gives us — and the user — a real trace.
+	// We intentionally do NOT pass --session. opencode's CLI uses the
+	// session id verbatim if provided (it does NOT auto-create) and
+	// then POSTs the message to a session its SQLite has never seen.
+	// The server returns 200, the session status is immediately
+	// "idle" (because there's no work queued for it), the event
+	// stream closes, and opencode exits 0 with empty stdout — the
+	// silent-failure mode we were debugging. Letting opencode create
+	// its own session each turn fixes that. Conversation continuity
+	// across turns lives in our agentStore (we render history in the
+	// chat UI from there); cross-turn LLM context within a single
+	// opencode invocation is a separate concern that the planned
+	// `opencode serve` sidecar will solve properly.
 	args := []string{
 		"run",
-		"--format", "json",
-		"--session", req.SessionID,
+		"--format", "default",
+		"--print-logs",
+		"--log-level", "INFO",
 		"--agent", defaultAgentName,
 		"--model", model,
 		"--dir", sessionDir,
@@ -181,54 +239,97 @@ func (r *OpenCodeRunner) writeConfig(sessionDir string, req AgentRunnerRequest) 
 	return os.WriteFile(filepath.Join(sessionDir, "opencode.jsonc"), raw, 0o600)
 }
 
-func parseOpenCodeEvents(r io.Reader, emit func(AgentEvent), finalText *strings.Builder) error {
+// streamOpenCodeStdout reads opencode's --format default stdout: under a
+// non-TTY parent (our exec.Cmd case) opencode writes each completed
+// assistant text chunk to stdout, one per line. We forward each
+// non-empty line as a "final" event so the chat UI streams them in.
+func streamOpenCodeStdout(r io.Reader, raw *strings.Builder, emit func(AgentEvent)) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if raw != nil {
+			raw.WriteString(line)
+			raw.WriteByte('\n')
+		}
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		ev := decodeOpenCodeEvent(line)
-		if ev.Kind == "" {
-			continue
-		}
-		if ev.Kind == "final" {
-			finalText.WriteString(ev.Text)
-		}
-		emit(ev)
+		emit(AgentEvent{Kind: "final", Text: line})
 	}
 	return scanner.Err()
 }
 
-func decodeOpenCodeEvent(line string) AgentEvent {
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		return AgentEvent{Kind: "final", Text: line}
-	}
-	text := firstString(raw, "content", "message", "text", "summary")
-	eventType := strings.ToLower(firstString(raw, "type", "event", "kind"))
-	toolName := firstString(raw, "tool", "toolName", "name")
-	switch {
-	case strings.Contains(eventType, "error"):
-		return AgentEvent{
-			Kind: "error",
-			Text: firstNonEmpty(
-				text,
-				nestedString(raw, "error", "data", "message"),
-				nestedString(raw, "error", "message"),
-				nestedString(raw, "error", "name"),
-			),
+// streamOpenCodeStderr reads opencode's --print-logs --log-level WARN
+// stream and surfaces ERROR / WARN lines so the user can see what
+// opencode is doing instead of getting a silent blank bubble. Migration
+// banners and known-benign warnings are dropped to keep the trace
+// tidy.
+func streamOpenCodeStderr(r io.Reader, raw *strings.Builder, emit func(AgentEvent)) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if raw != nil {
+			raw.WriteString(line)
+			raw.WriteByte('\n')
 		}
-	case strings.Contains(eventType, "tool") && strings.Contains(eventType, "result"):
-		return AgentEvent{Kind: "observation", Text: text, ToolName: toolName}
-	case strings.Contains(eventType, "tool"):
-		return AgentEvent{Kind: "action", Text: text, ToolName: toolName}
-	case strings.Contains(eventType, "assistant") || strings.Contains(eventType, "message") || text != "":
-		return AgentEvent{Kind: "final", Text: text}
-	default:
-		return AgentEvent{}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if isBenignOpenCodeNoise(trimmed) {
+			continue
+		}
+		kind := classifyOpenCodeLog(trimmed)
+		if kind == "" {
+			continue
+		}
+		emit(AgentEvent{Kind: kind, Text: trimmed})
 	}
+}
+
+func isBenignOpenCodeNoise(line string) bool {
+	switch {
+	// One-time SQLite migration on first run — already done before
+	// any real work and not actionable.
+	case strings.HasPrefix(line, "Performing one time database migration"),
+		line == "sqlite-migration:done",
+		line == "Database migration complete.":
+		return true
+	// background install of @opencode-ai/plugin is forkDetached and does
+	// not block the main flow; the warning is just noise for the user.
+	case strings.Contains(line, "background dependency install failed"):
+		return true
+	// Per-tool registry init logs ("tool.registry status=started/completed
+	// duration=0 grep" etc.) fire ~20× per call and obscure the actually
+	// interesting steps. Same for the internal event bus heartbeat.
+	case strings.Contains(line, "service=tool.registry"),
+		strings.Contains(line, "service=bus"):
+		return true
+	}
+	return false
+}
+
+func classifyOpenCodeLog(line string) string {
+	switch {
+	case strings.HasPrefix(line, "ERROR"),
+		strings.Contains(line, " ERROR "),
+		strings.HasPrefix(line, "FATAL"):
+		return "error"
+	case strings.HasPrefix(line, "WARN"),
+		strings.Contains(line, " WARN "):
+		return "thought"
+	case strings.HasPrefix(line, "INFO"),
+		strings.HasPrefix(line, "DEBUG"):
+		// We run with --log-level INFO so opencode's stage-by-stage
+		// progress (provider getSDK, llm request, session.prompt loop)
+		// shows in the trace as thoughts.
+		return "thought"
+	}
+	// Unstructured stderr lines (banners, stack traces, etc.) — surface
+	// as thoughts so the user has visibility.
+	return "thought"
 }
 
 func agentPrompt(skills []string) string {
@@ -246,30 +347,6 @@ func safePathPart(s string) string {
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "..", "_")
 	return replacer.Replace(s)
-}
-
-func firstString(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok {
-			return v
-		}
-	}
-	return ""
-}
-
-func nestedString(m map[string]any, path ...string) string {
-	var cur any = m
-	for _, key := range path {
-		next, ok := cur.(map[string]any)
-		if !ok {
-			return ""
-		}
-		cur = next[key]
-	}
-	if s, ok := cur.(string); ok {
-		return s
-	}
-	return ""
 }
 
 func firstNonEmpty(values ...string) string {

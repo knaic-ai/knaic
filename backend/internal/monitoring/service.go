@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 // AuthMode controls how the monitoring proxy authenticates against the
@@ -30,26 +30,34 @@ import (
 //   - AuthStaticBearer: send a fixed bearer string (StaticBearer field).
 //     Useful when the upstream uses a service-account token unrelated to the
 //     end user.
+//   - AuthBasic: send HTTP basic auth using BasicUser/BasicPassword. Used
+//     when the upstream sits behind an oauth2-proxy with an htpasswd
+//     fallback (the OIDC redirect dance can't be driven from a backend).
 type AuthMode string
 
 const (
-	AuthNone          AuthMode = ""
-	AuthForwardOIDC   AuthMode = "forward"
-	AuthStaticBearer  AuthMode = "bearer"
+	AuthNone         AuthMode = ""
+	AuthForwardOIDC  AuthMode = "forward"
+	AuthStaticBearer AuthMode = "bearer"
+	AuthBasic        AuthMode = "basic"
 )
 
 type Service struct {
-	baseURL       string
-	client        *http.Client
-	now           func() time.Time
-	authMode      AuthMode
-	staticBearer  string
+	baseURL      string
+	client       *http.Client
+	now          func() time.Time
+	authMode     AuthMode
+	staticBearer string
+	basicUser    string
+	basicPass    string
 }
 
 // Options bundles optional construction settings. Pass {} for defaults.
 type Options struct {
-	AuthMode     AuthMode
-	StaticBearer string
+	AuthMode      AuthMode
+	StaticBearer  string
+	BasicUser     string
+	BasicPassword string
 }
 
 func NewService(baseURL string, client *http.Client) *Service {
@@ -66,8 +74,33 @@ func NewServiceWithOptions(baseURL string, client *http.Client, opts Options) *S
 		now:          func() time.Time { return time.Now().UTC() },
 		authMode:     opts.AuthMode,
 		staticBearer: opts.StaticBearer,
+		basicUser:    opts.BasicUser,
+		basicPass:    opts.BasicPassword,
 	}
 }
+
+// BaseURL returns the upstream endpoint. Empty means dev/synthetic mode.
+func (s *Service) BaseURL() string { return s.baseURL }
+
+// ApplyAuth stamps the configured Authorization header on a request. Exposed
+// so adjacent packages (e.g. internal/gpu's monitoring-backed Status path)
+// can reuse the same auth without having to know which mode is in use.
+func (s *Service) ApplyAuth(ctx context.Context, req *http.Request) {
+	if s.authMode == AuthBasic {
+		if s.basicUser != "" || s.basicPass != "" {
+			req.SetBasicAuth(s.basicUser, s.basicPass)
+		}
+		return
+	}
+	if tok := s.bearerFor(ctx); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+}
+
+// Client exposes the underlying http.Client so adjacent packages can issue
+// their own queries against the same upstream without re-wiring transport
+// config (TLS, timeouts).
+func (s *Service) Client() *http.Client { return s.client }
 
 func (s *Service) QueryRange(ctx context.Context, req QueryRequest) (Series, error) {
 	query, unit, err := PromQL(req)
@@ -88,24 +121,45 @@ func (s *Service) QueryRange(ctx context.Context, req QueryRequest) (Series, err
 		series.Query = query
 		return series, nil
 	}
+	series, err := s.runRange(ctx, query, req.Start, req.End, req.Step)
+	if err != nil {
+		return Series{}, err
+	}
+	series.Unit = unit
+	series.Source = SourcePrometheus
+	series.Query = query
+	return series, nil
+}
+
+// runRange issues a single Prometheus /api/v1/query_range call and decodes
+// the matrix response into Points. Shared by QueryRange and the LLM/Train
+// bundle methods. Caller fills Unit / Source / Query on the returned Series.
+func (s *Service) runRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (Series, error) {
+	if end.IsZero() {
+		end = s.now()
+	}
+	if start.IsZero() {
+		start = end.Add(-3 * time.Hour)
+	}
+	if step == 0 {
+		step = 5 * time.Minute
+	}
 	u, err := url.Parse(s.baseURL + "/api/v1/query_range")
 	if err != nil {
 		return Series{}, err
 	}
 	q := u.Query()
 	q.Set("query", query)
-	q.Set("start", strconv.FormatInt(req.Start.Unix(), 10))
-	q.Set("end", strconv.FormatInt(req.End.Unix(), 10))
-	q.Set("step", strconv.FormatInt(int64(req.Step.Seconds()), 10))
+	q.Set("start", strconv.FormatInt(start.Unix(), 10))
+	q.Set("end", strconv.FormatInt(end.Unix(), 10))
+	q.Set("step", strconv.FormatInt(int64(step.Seconds()), 10))
 	u.RawQuery = q.Encode()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return Series{}, err
 	}
-	if tok := s.bearerFor(ctx); tok != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+tok)
-	}
+	s.ApplyAuth(ctx, httpReq)
 	res, err := s.client.Do(httpReq)
 	if err != nil {
 		return Series{}, err
@@ -118,7 +172,7 @@ func (s *Service) QueryRange(ctx context.Context, req QueryRequest) (Series, err
 	if err != nil {
 		return Series{}, err
 	}
-	return Series{Points: points, Unit: unit, Source: SourcePrometheus, Query: query}, nil
+	return Series{Points: points}, nil
 }
 
 // DeviceUsageRequest selects the time range for a per-GPU usage probe.
@@ -177,9 +231,7 @@ func (s *Service) RawDeviceUsage(ctx context.Context, req DeviceUsageRequest) ([
 	if err != nil {
 		return nil, err
 	}
-	if tok := s.bearerFor(ctx); tok != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+tok)
-	}
+	s.ApplyAuth(ctx, httpReq)
 	res, err := s.client.Do(httpReq)
 	if err != nil {
 		return nil, err

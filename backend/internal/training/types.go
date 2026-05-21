@@ -11,6 +11,17 @@ type EnvVar struct {
 	Value string `json:"value"`
 }
 
+// RuntimePreJob is one pre-training step (e.g. dataset download, model
+// download). Each becomes a sibling replicatedJob in the TrainingRuntime,
+// linked by dependsOn so they run in order before the trainer.
+type RuntimePreJob struct {
+	Name    string   `json:"name"`
+	Image   string   `json:"image"`
+	Command []string `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []EnvVar `json:"env,omitempty"`
+}
+
 // CreateRuntimeRequest is the body of POST /namespaces/{ns}/training/runtimes.
 type CreateRuntimeRequest struct {
 	Name      string `json:"name"`
@@ -18,9 +29,23 @@ type CreateRuntimeRequest struct {
 	Image     string `json:"image"`
 	NumNodes  int64  `json:"numNodes"`
 
-	CPULimit    string `json:"cpuLimit,omitempty"`
-	MemoryLimit string `json:"memoryLimit,omitempty"`
-	GPULimit    int64  `json:"gpuLimit,omitempty"`
+	// Trainer container overrides. Empty fields keep the image defaults.
+	Command []string `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []EnvVar `json:"env,omitempty"`
+
+	// Resources are request/limit pairs (InferenceRuntime parity). When a
+	// limit is empty we copy from the request. GPUValues is keyed on the
+	// extended resource name (nvidia.com/gpu, nvidia.com/gpualloc, …).
+	CPURequest    string           `json:"cpuRequest,omitempty"`
+	CPULimit      string           `json:"cpuLimit,omitempty"`
+	MemoryRequest string           `json:"memoryRequest,omitempty"`
+	MemoryLimit   string           `json:"memoryLimit,omitempty"`
+	GPUValues     map[string]int64 `json:"gpuValues,omitempty"`
+
+	// PreJobs run in order before the trainer. Each becomes its own
+	// replicatedJob; the trainer dependsOn the last pre-job.
+	PreJobs []RuntimePreJob `json:"preJobs,omitempty"`
 }
 
 // CreateJobRequest is the body of POST /namespaces/{ns}/training/jobs.

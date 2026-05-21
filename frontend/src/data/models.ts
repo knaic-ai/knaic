@@ -1,7 +1,8 @@
 import { createStore, useStore, uid } from './store';
 
 export type ModelScope = 'public' | 'private';
-export type ModelScheme = 'hf' | 'modelscope' | 's3' | 'oci';
+export type ModelScheme = 'hf' | 'modelscope' | 's3' | 'oci' | 'gitlab' | 'pvc' | 'git';
+export type DerivedKind = 'finetune' | 'quantization' | 'adapter';
 
 export interface ModelItem {
   id: string;
@@ -18,6 +19,10 @@ export interface ModelItem {
   createdAt: string;
   updatedAt: string;
   readme: string;
+  collectionId?: string;
+  parentModelId?: string;
+  derivedKind?: DerivedKind | '';
+  sourceUrl?: string;
 }
 
 const now = () => new Date().toISOString().slice(0, 10);
@@ -295,7 +300,28 @@ export async function deleteModel(id: string): Promise<void> {
 }
 
 export function parseUri(uri: string): ModelScheme | null {
-  const m = uri.match(/^(hf|hf-mirror|modelscope|s3|oci):\/\//);
-  if (m?.[1] === 'hf-mirror') return 'hf';
+  const m = uri.match(/^(hf|hf-mirror|hf-local|modelscope|s3|oci|gitlab|pvc|git):\/\//);
+  if (m?.[1] === 'hf-mirror' || m?.[1] === 'hf-local') return 'hf';
   return (m?.[1] as ModelScheme) ?? null;
+}
+
+// publicSourceURL: matches backend models.PublicSourceURL — returns the
+// canonical web URL for a model URI, or '' when the URI is not a known
+// public source. Used to render the "Open in upstream" button.
+export function publicSourceURL(uri: string, sourceUrl?: string): string {
+  if (sourceUrl) return sourceUrl;
+  if (uri.startsWith('hf://')) return `https://huggingface.co/${uri.slice('hf://'.length)}`;
+  if (uri.startsWith('hf-mirror://')) return `https://hf-mirror.com/${uri.slice('hf-mirror://'.length)}`;
+  if (uri.startsWith('modelscope://')) return `https://www.modelscope.cn/models/${uri.slice('modelscope://'.length)}`;
+  return '';
+}
+
+export function isPublicSource(uri: string): boolean {
+  return (
+    uri.startsWith('hf://') ||
+    uri.startsWith('hf-mirror://') ||
+    uri.startsWith('modelscope://') ||
+    uri.startsWith('http://') ||
+    uri.startsWith('https://')
+  );
 }

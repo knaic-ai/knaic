@@ -39,6 +39,20 @@ CREATE INDEX IF NOT EXISTS knaic_models_scope_ns
 
 ALTER TABLE knaic_models
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE knaic_models
+    ADD COLUMN IF NOT EXISTS collection_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knaic_models
+    ADD COLUMN IF NOT EXISTS parent_model_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knaic_models
+    ADD COLUMN IF NOT EXISTS derived_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE knaic_models
+    ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS knaic_models_collection
+    ON knaic_models (collection_id) WHERE collection_id <> '';
+CREATE INDEX IF NOT EXISTS knaic_models_parent
+    ON knaic_models (parent_model_id) WHERE parent_model_id <> '';
 `
 
 type PostgresStore struct {
@@ -63,38 +77,46 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 }
 
 type modelRow struct {
-	ID        string         `db:"id"`
-	Name      string         `db:"name"`
-	Owner     string         `db:"owner"`
-	Scope     string         `db:"scope"`
-	Namespace string         `db:"namespace"`
-	URI       string         `db:"uri"`
-	Scheme    string         `db:"scheme"`
-	Tags      pq.StringArray `db:"tags"`
-	ModelType string         `db:"model_type"`
-	SizeGB    float64        `db:"size_gb"`
-	Downloads int            `db:"downloads"`
-	CreatedAt time.Time      `db:"created_at"`
-	UpdatedAt time.Time      `db:"updated_at"`
-	Readme    string         `db:"readme"`
+	ID            string         `db:"id"`
+	Name          string         `db:"name"`
+	Owner         string         `db:"owner"`
+	Scope         string         `db:"scope"`
+	Namespace     string         `db:"namespace"`
+	URI           string         `db:"uri"`
+	Scheme        string         `db:"scheme"`
+	Tags          pq.StringArray `db:"tags"`
+	ModelType     string         `db:"model_type"`
+	SizeGB        float64        `db:"size_gb"`
+	Downloads     int            `db:"downloads"`
+	CreatedAt     time.Time      `db:"created_at"`
+	UpdatedAt     time.Time      `db:"updated_at"`
+	Readme        string         `db:"readme"`
+	CollectionID  string         `db:"collection_id"`
+	ParentModelID string         `db:"parent_model_id"`
+	DerivedKind   string         `db:"derived_kind"`
+	SourceURL     string         `db:"source_url"`
 }
 
 func (r modelRow) toModel() Model {
 	return Model{
-		ID:        r.ID,
-		Name:      r.Name,
-		Owner:     r.Owner,
-		Scope:     Scope(r.Scope),
-		Namespace: r.Namespace,
-		URI:       r.URI,
-		Scheme:    Scheme(r.Scheme),
-		Tags:      []string(r.Tags),
-		ModelType: r.ModelType,
-		SizeGB:    r.SizeGB,
-		Downloads: r.Downloads,
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
-		Readme:    r.Readme,
+		ID:            r.ID,
+		Name:          r.Name,
+		Owner:         r.Owner,
+		Scope:         Scope(r.Scope),
+		Namespace:     r.Namespace,
+		URI:           r.URI,
+		Scheme:        Scheme(r.Scheme),
+		Tags:          []string(r.Tags),
+		ModelType:     r.ModelType,
+		SizeGB:        r.SizeGB,
+		Downloads:     r.Downloads,
+		CreatedAt:     r.CreatedAt,
+		UpdatedAt:     r.UpdatedAt,
+		Readme:        r.Readme,
+		CollectionID:  r.CollectionID,
+		ParentModelID: r.ParentModelID,
+		DerivedKind:   DerivedKind(r.DerivedKind),
+		SourceURL:     r.SourceURL,
 	}
 }
 
@@ -134,12 +156,14 @@ func (s *PostgresStore) Create(ctx context.Context, m Model) (Model, error) {
 		m.CreatedAt = m.UpdatedAt
 	}
 	q := `INSERT INTO knaic_models
-	      (id, name, owner, scope, namespace, uri, scheme, tags, model_type, size_gb, downloads, created_at, updated_at, readme)
-	      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`
+	      (id, name, owner, scope, namespace, uri, scheme, tags, model_type, size_gb, downloads, created_at, updated_at, readme,
+	       collection_id, parent_model_id, derived_kind, source_url)
+	      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`
 	_, err := s.db.ExecContext(ctx, q,
 		m.ID, m.Name, m.Owner, string(m.Scope), m.Namespace,
 		m.URI, string(m.Scheme), pq.StringArray(m.Tags), m.ModelType,
 		m.SizeGB, m.Downloads, m.CreatedAt, m.UpdatedAt, m.Readme,
+		m.CollectionID, m.ParentModelID, string(m.DerivedKind), m.SourceURL,
 	)
 	if err != nil {
 		// Translate the unique-violation error (SQLSTATE 23505) into our
@@ -174,8 +198,10 @@ func (s *PostgresStore) Update(ctx context.Context, id string, mutate func(*Mode
 	m.UpdatedAt = time.Now().UTC()
 
 	_, err = tx.ExecContext(ctx,
-		`UPDATE knaic_models SET readme=$1, tags=$2, downloads=$3, updated_at=$4 WHERE id=$5`,
-		m.Readme, pq.StringArray(m.Tags), m.Downloads, m.UpdatedAt, m.ID,
+		`UPDATE knaic_models SET readme=$1, tags=$2, downloads=$3, updated_at=$4,
+		   collection_id=$5, parent_model_id=$6, derived_kind=$7, source_url=$8 WHERE id=$9`,
+		m.Readme, pq.StringArray(m.Tags), m.Downloads, m.UpdatedAt,
+		m.CollectionID, m.ParentModelID, string(m.DerivedKind), m.SourceURL, m.ID,
 	)
 	if err != nil {
 		return Model{}, err

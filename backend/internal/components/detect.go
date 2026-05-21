@@ -15,16 +15,20 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// Detector resolves the live install state of a single component:
-//   - releases knaic owns (label match)        -> Installed / knaic
-//   - releases of the same chart (any owner)   -> Installed / manual
-//   - operator-installed (CSV present)         -> Installed / OLM
-//   - matching Deployment exists               -> Installed / manual
-//   - none of the above                        -> NotInstalled
+// Detector resolves the live install state of a single component.
 //
-// All listings (Helm, OLM CSV, deployments) are taken once per snapshotTTL
-// window and cached so N parallel per-component requests share one cluster
-// scan.
+// Priority (first match wins):
+//   1. OLM ClusterServiceVersion              -> Installed / OLM
+//   2. knaic-owned Helm release (label match) -> Installed / knaic
+//   3. any other Helm release of the chart    -> Installed / manual
+//   4. none of the above                      -> NotInstalled
+//
+// Each match attempt consults the component's Name and every entry in
+// Aliases — that lets knaic recognise a component whose canonical name
+// diverges from the upstream chart's.
+//
+// All listings (Helm, OLM CSV) are taken once per snapshotTTL window and
+// cached so N parallel per-component requests share one cluster scan.
 type Detector struct {
 	helm  HelmClient
 	typed kubernetes.Interface
@@ -58,20 +62,11 @@ type csvHit struct {
 	namespace string
 }
 
-// appReleaseHit captures an Alauda ACP AppRelease (operator.alauda.io/v1alpha1)
-// that owns one or more Helm releases.
-type appReleaseHit struct {
-	name      string
-	namespace string
-}
-
 type clusterSnapshot struct {
-	releasesByChart   map[string][]helmReleaseHit
-	csvs              []csvHit
-	deploymentsByComp map[string]string        // component label value -> namespace
-	appReleases       map[string]appReleaseHit // any of: AppRelease name / chart releaseName / chart name suffix -> hit
-	helmErr           error
-	csvErr            error
+	releasesByChart map[string][]helmReleaseHit
+	csvs            []csvHit
+	helmErr         error
+	csvErr          error
 }
 
 // snapshot returns a cached cluster scan. Multiple goroutines firing within
@@ -114,28 +109,6 @@ func (d *Detector) snapshot(ctx context.Context) *clusterSnapshot {
 		} else {
 			snap.csvs = hits
 		}
-		snap.appReleases = d.listAppReleases(ctx)
-	}
-	if d.typed != nil {
-		// One cluster-wide LIST keyed on the knaic component label, instead
-		// of N×namespace per-component lookups. Deployments installed via
-		// Helm/OLM also wear this label (knaic itself stamps it on Install),
-		// so we don't need separate per-namespace fallbacks.
-		snap.deploymentsByComp = map[string]string{}
-		dep, err := d.typed.AppsV1().Deployments(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
-			LabelSelector: ComponentLabel,
-		})
-		if err == nil {
-			for _, item := range dep.Items {
-				comp := item.Labels[ComponentLabel]
-				if comp == "" {
-					continue
-				}
-				if _, seen := snap.deploymentsByComp[comp]; !seen {
-					snap.deploymentsByComp[comp] = item.Namespace
-				}
-			}
-		}
 	}
 	d.snap = snap
 	d.snapExpires = time.Now().Add(d.snapTTL)
@@ -164,12 +137,25 @@ func (d *Detector) DetectOne(ctx context.Context, store *Store, name string) (Co
 		return c, nil
 	}
 
-	// Priority: knaic-owned Helm > ACP AppRelease > raw Helm > OLM CSV >
-	// labeled Deployment. AppRelease is checked before "raw Helm" because an
-	// AppRelease *creates* a Helm release; reporting "ACP" is more useful
-	// than the generic "manual" we'd otherwise infer from that same release.
-	if hits := snap.releasesByChart[c.Name]; len(hits) > 0 {
-		for _, h := range hits {
+	// Names to probe each index with. The component's own Name takes
+	// precedence (preserves install history); aliases catch upstream-named
+	// artefacts that don't match the canonical knaic identity.
+	probe := componentProbeNames(c)
+
+	// 1. OLM CSV — strongest signal of operator-managed lifecycle.
+	for _, n := range probe {
+		if csv, ok := matchCSV(n, snap.csvs); ok {
+			return store.Update(name, func(item *Component) {
+				item.Status = StatusInstalled
+				item.Namespace = csv.namespace
+				item.ManagedBy = ManagedByOLM
+				item.Notes = fmt.Sprintf("Detected via OLM ClusterServiceVersion %q in %q.", csv.name, csv.namespace)
+			})
+		}
+	}
+	// 2. knaic-owned Helm release — explicit label match.
+	for _, n := range probe {
+		for _, h := range snap.releasesByChart[n] {
 			if h.owner == ManagedByKnaic {
 				return store.Update(name, func(item *Component) {
 					item.Status = StatusInstalled
@@ -180,38 +166,17 @@ func (d *Detector) DetectOne(ctx context.Context, store *Store, name string) (Co
 			}
 		}
 	}
-	if hit, ok := snap.appReleases[c.Name]; ok {
-		return store.Update(name, func(item *Component) {
-			item.Status = StatusInstalled
-			item.Namespace = hit.namespace
-			item.ManagedBy = ManagedByACP
-			item.Notes = fmt.Sprintf("Managed by ACP AppRelease %q in %q.", hit.name, hit.namespace)
-		})
-	}
-	if hits := snap.releasesByChart[c.Name]; len(hits) > 0 {
-		chosen := hits[0]
-		return store.Update(name, func(item *Component) {
-			item.Status = StatusInstalled
-			item.Namespace = chosen.namespace
-			item.ManagedBy = chosen.owner
-			item.Notes = fmt.Sprintf("Helm release %q in %q (not installed by knaic).", chosen.name, chosen.namespace)
-		})
-	}
-	if csv, ok := matchCSV(c.Name, snap.csvs); ok {
-		return store.Update(name, func(item *Component) {
-			item.Status = StatusInstalled
-			item.Namespace = csv.namespace
-			item.ManagedBy = ManagedByOLM
-			item.Notes = fmt.Sprintf("Detected via OLM ClusterServiceVersion %q in %q.", csv.name, csv.namespace)
-		})
-	}
-	if ns := snap.deploymentsByComp[c.Name]; ns != "" {
-		return store.Update(name, func(item *Component) {
-			item.Status = StatusInstalled
-			item.Namespace = ns
-			item.ManagedBy = ManagedByManual
-			item.Notes = fmt.Sprintf("Deployment with %s=%s label found in %q.", ComponentLabel, c.Name, ns)
-		})
+	// 3. Other Helm release of the same chart (not installed by knaic).
+	for _, n := range probe {
+		if hits := snap.releasesByChart[n]; len(hits) > 0 {
+			chosen := hits[0]
+			return store.Update(name, func(item *Component) {
+				item.Status = StatusInstalled
+				item.Namespace = chosen.namespace
+				item.ManagedBy = chosen.owner
+				item.Notes = fmt.Sprintf("Helm release %q in %q (not installed by knaic).", chosen.name, chosen.namespace)
+			})
+		}
 	}
 
 	return store.Update(name, func(item *Component) {
@@ -223,77 +188,6 @@ func (d *Detector) DetectOne(ctx context.Context, store *Store, name string) (Co
 			item.Namespace = store.SystemNamespace()
 		}
 	})
-}
-
-// listAppReleases returns an index of Alauda ACP AppReleases keyed on every
-// alias the detector might match a component against:
-//   - AppRelease metadata.name                  (e.g. "mlflow")
-//   - spec.source.charts[*].releaseName         (e.g. "kubeflow-trainer")
-//   - chart name with the leading "chart-" stripped, e.g. "chart-lws" -> "lws"
-//
-// First write wins so the AppRelease's own metadata.name takes precedence.
-// Returns an empty map if the CRD isn't installed (common on non-ACP clusters).
-func (d *Detector) listAppReleases(ctx context.Context) map[string]appReleaseHit {
-	gvr := schema.GroupVersionResource{
-		Group:    "operator.alauda.io",
-		Version:  "v1alpha1",
-		Resource: "appreleases",
-	}
-	list, err := d.dyn.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil
-	}
-	out := map[string]appReleaseHit{}
-	add := func(key string, hit appReleaseHit) {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			return
-		}
-		if _, exists := out[key]; !exists {
-			out[key] = hit
-		}
-	}
-	for _, item := range list.Items {
-		hit := appReleaseHit{name: item.GetName(), namespace: item.GetNamespace()}
-		add(item.GetName(), hit)
-		charts, _, _ := unstructuredNestedSlice(item.Object, "spec", "source", "charts")
-		for _, raw := range charts {
-			m, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if rn, ok := m["releaseName"].(string); ok {
-				add(rn, hit)
-			}
-			if cn, ok := m["name"].(string); ok {
-				// "acp/chart-cert-manager" -> "cert-manager"
-				if i := strings.LastIndex(cn, "/"); i >= 0 {
-					cn = cn[i+1:]
-				}
-				cn = strings.TrimPrefix(cn, "chart-")
-				add(cn, hit)
-			}
-		}
-	}
-	return out
-}
-
-// unstructuredNestedSlice mirrors unstructured.NestedSlice without dragging
-// in the apimachinery import for this file's only use of it.
-func unstructuredNestedSlice(obj map[string]any, fields ...string) ([]any, bool, error) {
-	var cur any = obj
-	for _, f := range fields {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return nil, false, nil
-		}
-		cur, ok = m[f]
-		if !ok {
-			return nil, false, nil
-		}
-	}
-	s, ok := cur.([]any)
-	return s, ok, nil
 }
 
 // listCSVs returns OLM ClusterServiceVersion {name, namespace} pairs across
@@ -318,6 +212,28 @@ func (d *Detector) listCSVs(ctx context.Context) ([]csvHit, error) {
 		out = append(out, csvHit{name: item.GetName(), namespace: item.GetNamespace()})
 	}
 	return out, nil
+}
+
+// componentProbeNames returns the names to probe each detection index
+// with — the component's own Name followed by any declared Aliases, with
+// blanks and duplicates removed. Name always comes first so an exact
+// canonical match wins over an alias-driven one.
+func componentProbeNames(c Component) []string {
+	out := make([]string, 0, 1+len(c.Aliases))
+	seen := map[string]bool{}
+	push := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	push(c.Name)
+	for _, a := range c.Aliases {
+		push(a)
+	}
+	return out
 }
 
 // matchCSV tries a few common CSV name patterns for a given component.

@@ -116,11 +116,6 @@ export function ComponentsPage() {
       ),
     },
     {
-      title: 'Images synced',
-      dataIndex: 'imageSync',
-      render: v => <StatusTag value={v === 'Synced' ? 'Succeeded' : v === 'Pending' ? 'Progressing' : v} />,
-    },
-    {
       title: 'Actions',
       width: 280,
       render: (_, r) => {

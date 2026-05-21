@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Table, Tag, Space, Button, App } from 'antd';
-import { CodeOutlined, DeleteOutlined } from '@ant-design/icons';
+import { CodeOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { YamlViewer } from '@/components/YamlViewer';
+import { YamlEditor } from '@/components/YamlEditor';
 import {
   buildServiceYaml,
+  createClusterResource,
   deleteClusterResource,
   ensureServicesLoaded,
   fetchClusterResourceYaml,
+  serviceTemplate,
   useK8sServices,
 } from '@/data/clusterResources';
 import { useApp } from '@/context/AppContext';
@@ -18,6 +21,9 @@ export function Services() {
   const all = useK8sServices();
   const data = useMemo(() => all.filter(s => s.namespace === namespace), [all, namespace]);
   const [yaml, setYaml] = useState<{ title: string; body: string } | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createYaml, setCreateYaml] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     ensureServicesLoaded(namespace);
@@ -34,9 +40,35 @@ export function Services() {
     }
   }
 
+  function openCreate() {
+    setCreateYaml(serviceTemplate(namespace));
+    setCreateOpen(true);
+  }
+
+  async function submitCreate() {
+    setCreating(true);
+    try {
+      await createClusterResource('services', namespace, createYaml);
+      setCreateOpen(false);
+      message.success('Service created');
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : 'Failed to create Service');
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <div className="knaic-page">
-      <PageHeader title="Services" description={`Kubernetes Services in namespace ${namespace}`} />
+      <PageHeader
+        title="Services"
+        description={`Kubernetes Services in namespace ${namespace}`}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            New Service
+          </Button>
+        }
+      />
       <Table
         rowKey="id"
         size="middle"
@@ -95,6 +127,15 @@ export function Services() {
         onClose={() => setYaml(null)}
         title={yaml?.title ?? ''}
         yaml={yaml?.body ?? ''}
+      />
+      <YamlEditor
+        open={createOpen}
+        title={`New Service in ${namespace}`}
+        value={createYaml}
+        saving={creating}
+        onChange={setCreateYaml}
+        onSave={() => void submitCreate()}
+        onClose={() => setCreateOpen(false)}
       />
     </div>
   );

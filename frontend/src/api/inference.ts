@@ -50,6 +50,113 @@ export function listDeploymentModes(): Promise<DeploymentModesInfo> {
   return request<DeploymentModesInfo>('/api/v1/inference/deployment-modes');
 }
 
+// KServeGatewayDTO mirrors backend KServeGatewayStatus — bits of the
+// kserve-ingress-gateway Gateway resource the UI cares about.
+export interface KServeGatewayDTO {
+  namespace: string;
+  name: string;
+  gatewayClassName?: string;
+  status: string;
+  addresses?: string[];
+  listeners?: string[];
+}
+
+// GatewayConfigDTO is the response of GET /api/v1/inference/gateway.
+export interface GatewayConfigDTO {
+  ingressGatewayApiEnabled: boolean;
+  defaultDeploymentMode?: string;
+  ingressDomain?: string;
+  urlScheme?: string;
+  disableIstioVirtualHost?: boolean;
+  gatewayApiInstalled: boolean;
+  envoyAiGatewayInstalled: boolean;
+  gateway?: KServeGatewayDTO;
+}
+
+export function fetchGatewayConfig(): Promise<GatewayConfigDTO> {
+  return request<GatewayConfigDTO>('/api/v1/inference/gateway');
+}
+
+// Per-InferenceService route + rate-limit picture.
+export interface RouteRefDTO {
+  apiVersion: string;
+  kind: string;
+  namespace: string;
+  name: string;
+  hostnames?: string[];
+  parentName?: string;
+  status?: string;
+}
+
+export interface RateLimitRefDTO {
+  namespace: string;
+  name: string;
+  targetKind?: string;
+  targetName?: string;
+  type?: string;
+  summaries?: string[];
+}
+
+export interface BackendServiceRefDTO {
+  namespace?: string;
+  name: string;
+  port?: number;
+}
+
+export interface ServiceRouteStatusDTO {
+  routes: RouteRefDTO[];
+  rateLimits: RateLimitRefDTO[];
+  backends?: BackendServiceRefDTO[];
+  suggestions?: string[];
+}
+
+export function fetchServiceRouteStatus(
+  ns: string,
+  name: string,
+): Promise<ServiceRouteStatusDTO> {
+  return request<ServiceRouteStatusDTO>(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(name)}/route-status`,
+  );
+}
+
+export interface RateLimitConfigDTO {
+  requests: number;
+  unit: 'Second' | 'Minute' | 'Hour' | 'Day';
+  clientHeader?: string;
+  countTokens?: boolean;
+}
+
+export interface CreateAIGatewayRouteRequest {
+  gatewayNamespace?: string;
+  gatewayName?: string;
+  hostnames?: string[];
+  modelHeader?: string;
+  servicePort?: number;
+  rateLimit?: RateLimitConfigDTO;
+}
+
+export interface CreatedResourceDTO {
+  apiVersion: string;
+  kind: string;
+  namespace: string;
+  name: string;
+}
+
+export interface CreateAIGatewayRouteResultDTO {
+  created: CreatedResourceDTO[];
+}
+
+export function createAIGatewayRoute(
+  ns: string,
+  svcName: string,
+  req: CreateAIGatewayRouteRequest,
+): Promise<CreateAIGatewayRouteResultDTO> {
+  return request<CreateAIGatewayRouteResultDTO>(
+    `/api/v1/namespaces/${encodeURIComponent(ns)}/inference/services/${encodeURIComponent(svcName)}/gateway-route`,
+    { method: 'POST', body: req },
+  );
+}
+
 export interface CreateRuntimeRequest {
   name: string;
   image: string;

@@ -117,7 +117,7 @@ func projectInferenceService(o *unstructured.Unstructured) Projection {
 		}
 	}
 
-	endpoint, _, _ := unstructured.NestedString(o.Object, "status", "url")
+	endpoint := preferInternalURL(o)
 
 	p["kind"] = "InferenceService"
 	p["runtime"] = runtime
@@ -188,7 +188,7 @@ func projectLLMInferenceService(o *unstructured.Unstructured) Projection {
 	if len(baseConfigs) > 0 {
 		p["baseConfigs"] = baseConfigs
 	}
-	endpoint, _, _ := unstructured.NestedString(o.Object, "status", "url")
+	endpoint := preferInternalURL(o)
 	p["kind"] = "LLMInferenceService"
 	p["runtime"] = runtime
 	p["modelUri"] = storageURI
@@ -428,6 +428,30 @@ const (
 	stopAnnotation           = "serving.kserve.io/stop"
 	deploymentModeAnnotation = "serving.kserve.io/deploymentMode"
 )
+
+// preferInternalURL returns the cluster-internal URL when KServe has
+// populated it, falling back to the external one. status.url carries the
+// ingress hostname (e.g. http://my-svc.namespace.example.com), which only
+// resolves when the ingress is plumbed and the caller is outside the
+// cluster. Anything running in the cluster — the playground proxy, the
+// agent runner — needs the predictor's ClusterIP service URL, which KServe
+// publishes at status.address.url. KServe v1beta1 / v1alpha2 also expose
+// per-component addresses under status.components.predictor.address.url;
+// fall through to those when both top-level fields are empty so newer LLM
+// API revisions still work.
+func preferInternalURL(o *unstructured.Unstructured) string {
+	for _, path := range [][]string{
+		{"status", "address", "url"},
+		{"status", "components", "predictor", "address", "url"},
+		{"status", "components", "predictor", "url"},
+		{"status", "url"},
+	} {
+		if v, _, _ := unstructured.NestedString(o.Object, path...); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // projectClusterStorageContainer is the lightweight row projection for the
 // Storage Initializer page — name + the bits the user wants to scan in a

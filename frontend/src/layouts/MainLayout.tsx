@@ -4,6 +4,7 @@ import { fetchClusterInfo, type ClusterInfo } from '@/api/auth';
 import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
+  RobotOutlined,
   AppstoreOutlined,
   DatabaseOutlined,
   LineChartOutlined,
@@ -45,8 +46,8 @@ export function MainLayout() {
   const loc = useLocation();
   const [clusterInfo, setClusterInfo] = useState<ClusterInfo | null>(null);
 
-  // Pulled from kube-public/global-info via /api/v1/cluster-info; the
-  // header label tracks whichever cluster the backend is wired against.
+  // Fetched from /api/v1/cluster-info; the header label tracks whichever
+  // cluster name the backend was started with.
   useEffect(() => {
     if (!apiEnabled) return;
     let cancelled = false;
@@ -69,12 +70,13 @@ export function MainLayout() {
   const items: Item[] = useMemo(
     () => [
       { key: '/', icon: <DashboardOutlined />, label: <Link to="/">Dashboard</Link> },
+      { key: '/agent-workspace', icon: <RobotOutlined />, label: <Link to="/agent-workspace">Agent Workspace</Link> },
       {
         key: 'models-group',
         icon: <DatabaseOutlined />,
         label: 'Model Hub',
         children: [
-          { key: '/models/public', label: <Link to="/models/public">Public Models</Link> },
+          { key: '/models/public', label: <Link to="/models/public">Model Catalog</Link> },
           { key: '/models/private', label: <Link to="/models/private">Private Models</Link> },
         ],
       },
@@ -95,9 +97,11 @@ export function MainLayout() {
         label: 'Inference',
         children: [
           { key: '/inference/services', label: <Link to="/inference/services">Inference Services</Link> },
+          { key: '/inference/gateway', label: <Link to="/inference/gateway">Gateway</Link> },
           { key: '/inference/serving-runtimes', label: <Link to="/inference/serving-runtimes">Serving Runtimes</Link> },
           { key: '/inference/storage-initializers', label: <Link to="/inference/storage-initializers">Storage Initializer</Link> },
           { key: '/inference/llm-configs', label: <Link to="/inference/llm-configs">LLM Inference Config</Link> },
+          { key: '/inference/local-model-cache', label: <Link to="/inference/local-model-cache">Local Model Cache</Link> },
         ],
       },
       {
@@ -118,6 +122,20 @@ export function MainLayout() {
         children: [
           { key: '/training/runtimes', label: <Link to="/training/runtimes">Training Runtimes</Link> },
           { key: '/training/jobs', label: <Link to="/training/jobs">Train Jobs</Link> },
+        ],
+      },
+      // AI Storage is workload-adjacent so it sits with Training/Notebooks
+      // rather than down with the raw K8s storage view. Bracketed by
+      // explicit dividers so it reads as its own band.
+      { type: 'divider' as const },
+      {
+        key: 'aistorage',
+        icon: <HddOutlined />,
+        label: 'AI Storage',
+        children: [
+          { key: '/aistorage/s3', label: <Link to="/aistorage/s3">S3 Object Store</Link> },
+          { key: '/aistorage/pvc', label: <Link to="/aistorage/pvc">PVC</Link> },
+          { key: '/aistorage/gitlab', label: <Link to="/aistorage/gitlab">GitLab</Link> },
         ],
       },
       // Per-resource Kubernetes views grouped by function. Routes still live
@@ -182,6 +200,9 @@ export function MainLayout() {
                 { key: '/admin/namespaces', label: <Link to="/admin/namespaces">Namespaces</Link> },
                 { key: '/admin/nodes', label: <Link to="/admin/nodes">Nodes</Link> },
                 { key: '/admin/gpu-profiles', label: <Link to="/admin/gpu-profiles">GPU profiles</Link> },
+                { key: '/admin/s3-secrets', label: <Link to="/admin/s3-secrets">S3 Secrets</Link> },
+                { key: '/admin/gitlab-configs', label: <Link to="/admin/gitlab-configs">GitLab Configs</Link> },
+                { key: '/admin/model-publish-requests', label: <Link to="/admin/model-publish-requests">Model publish requests</Link> },
               ],
             },
           ] as Item[])
@@ -192,6 +213,18 @@ export function MainLayout() {
 
   const selected = useMemo(() => {
     const key = loc.pathname.replace(/\/$/, '') || '/';
+    // Nested URLs (e.g. the per-project file browser at
+    // /aistorage/gitlab/:config/:projectID) should still highlight the
+    // parent menu item — the user is still in that section, so leaving
+    // the menu un-highlighted is jarring.
+    if (key.startsWith('/aistorage/gitlab/')) return ['/aistorage/gitlab'];
+    // /models/:scope/:id (the detail page) should highlight the parent
+    // /models/:scope list item.
+    const modelDetail = key.match(/^\/models\/(public|private)\//);
+    if (modelDetail) return [`/models/${modelDetail[1]}`];
+    // /inference/services/:namespace/:name (the detail page) should keep
+    // "Inference Services" highlighted.
+    if (key.startsWith('/inference/services/')) return ['/inference/services'];
     return [key];
   }, [loc.pathname]);
 
@@ -212,6 +245,7 @@ export function MainLayout() {
       { prefix: '/inference', group: 'inference' },
       { prefix: '/playground', group: 'playground' },
       { prefix: '/training', group: 'training' },
+      { prefix: '/aistorage', group: 'aistorage' },
       { prefix: '/users', group: 'users' },
       { prefix: '/admin', group: 'admin' },
     ];
@@ -250,10 +284,30 @@ export function MainLayout() {
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider width={232} theme="dark" collapsible>
+      {/*
+        Pin the Sider to the viewport so its Menu scrolls independently —
+        otherwise a long nav (Admin Area expanded, AI Storage band, …)
+        pushes the page itself into a scroll and the header scrolls with
+        the content. position:sticky + top:0 keeps it under the page's
+        own scroll model (no fixed-positioned overlap with the Header)
+        and clipping the Sider to viewport height lets the inner Menu
+        own its own overflow.
+      */}
+      <Sider
+        width={232}
+        theme="dark"
+        collapsible
+        style={{
+          height: '100vh',
+          position: 'sticky',
+          top: 0,
+          overflow: 'hidden',
+        }}
+      >
         <div
           style={{
             height: 48,
+            flex: '0 0 auto',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -266,28 +320,48 @@ export function MainLayout() {
         >
           knaic
         </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          items={items}
-          selectedKeys={selected}
-          defaultOpenKeys={openKeys}
-        />
+        {/*
+          The Menu sits below the 48-px brand band; we give it the
+          remaining viewport height and let it scroll. Antd Sider's own
+          collapse trigger is 48 px tall too, so we subtract both —
+          otherwise the bottom-most menu item hides behind the trigger
+          when the list overflows.
+        */}
+        <div
+          style={{
+            height: 'calc(100vh - 96px)',
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            // Trap scroll momentum inside the menu so it does not roll
+            // over to the page when the user keeps scrolling at the
+            // top or bottom of the list.
+            overscrollBehavior: 'contain',
+          }}
+        >
+          <Menu
+            theme="dark"
+            mode="inline"
+            items={items}
+            selectedKeys={selected}
+            defaultOpenKeys={openKeys}
+            style={{ borderInlineEnd: 'none' }}
+          />
+        </div>
       </Sider>
       <Layout>
         <Header style={{ borderBottom: '1px solid var(--knaic-hdr-border, #d0e0fb)', display: 'flex', alignItems: 'center' }}>
           {/*
             Left side: brand → cluster name → namespace selector → role tag.
-            Per the cpaas convention, clusterName comes from the
-            kube-public/global-info ConfigMap; the namespace selector lives
-            right next to it because the two answer the same question
+            clusterName comes from the backend /api/v1/cluster-info endpoint
+            (configured via KNAIC_CLUSTER_NAME); the namespace selector
+            lives right next to it because the two answer the same question
             ("where am I working?").
           */}
           <Space size={12} style={{ flex: 1 }}>
             <Tag color="blue" style={{ margin: 0 }}>
               <AppstoreOutlined /> Kubernetes Native AI Console
             </Tag>
-            <Tooltip title="Cluster identity (kube-public/global-info)">
+            <Tooltip title="Cluster identity (from KNAIC_CLUSTER_NAME)">
               <span className="knaic-sub">
                 Cluster: <b>{clusterInfo?.clusterName || (apiEnabled ? '…' : 'prototype')}</b>
               </span>

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/alauda/knaic-backend/internal/components"
+	"github.com/knaic/knaic-backend/internal/components"
 )
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

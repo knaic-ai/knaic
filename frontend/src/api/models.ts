@@ -19,6 +19,10 @@ export interface CreateModelRequest {
   modelType?: string;
   sizeGB?: number;
   readme?: string;
+  collectionId?: string;
+  parentModelId?: string;
+  derivedKind?: 'finetune' | 'quantization' | 'adapter';
+  sourceUrl?: string;
 }
 
 export function createModel(req: CreateModelRequest): Promise<ModelItem> {
@@ -50,9 +54,19 @@ export function uploadModel(req: UploadModelRequest): Promise<ModelItem> {
   return request<ModelItem>('/api/v1/models/upload', { method: 'POST', body: req });
 }
 
+export interface PatchModelRequest {
+  readme?: string;
+  tags?: string[];
+  incDownloads?: number;
+  collectionId?: string;
+  parentModelId?: string;
+  derivedKind?: 'finetune' | 'quantization' | 'adapter' | '';
+  sourceUrl?: string;
+}
+
 export function patchModel(
   id: string,
-  patch: { readme?: string; tags?: string[]; incDownloads?: number },
+  patch: PatchModelRequest,
 ): Promise<ModelItem> {
   return request<ModelItem>(`/api/v1/models/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -62,4 +76,31 @@ export function patchModel(
 
 export function deleteModel(id: string): Promise<void> {
   return request<void>(`/api/v1/models/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ModelTree mirrors backend modelTreeNode: optional parent + grouped children.
+export interface ModelTreeDTO {
+  parent?: ModelItem;
+  self: ModelItem;
+  children: Record<'finetune' | 'quantization' | 'adapter', ModelItem[]>;
+}
+
+export function getModelTree(id: string): Promise<ModelTreeDTO> {
+  return request<ModelTreeDTO>(`/api/v1/models/${encodeURIComponent(id)}/tree`);
+}
+
+export interface InferenceServiceRef {
+  namespace: string;
+  name: string;
+  kind: 'InferenceService' | 'LLMInferenceService';
+  modelUri: string;
+  ready?: string;
+}
+
+export function listInferenceServicesUsingModel(
+  id: string,
+  namespace?: string,
+): Promise<InferenceServiceRef[]> {
+  const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : '';
+  return request<InferenceServiceRef[]>(`/api/v1/models/${encodeURIComponent(id)}/inference-services${qs}`);
 }

@@ -188,15 +188,36 @@ func quantityToInt64(q resource.Quantity) int64 {
 // (for HAMi-style multi-key vendors) declares which key is the "primary"
 // count — that's the one summed into the headline total to avoid
 // double-counting auxiliary keys like gpucores / gpumem.
-func vendorOf(key string) (vendor string, primary bool) {
+//
+// allKeys lets us disambiguate the nvidia.com/* family: HAMi installs
+// REPLACE the vanilla NVIDIA device plugin and re-advertise the same
+// nvidia.com/gpu key (now as a vGPU slot count) alongside their
+// gpualloc / gpucores / gpumem auxiliaries. When any of those auxiliary
+// keys is present we treat the whole nvidia.com bucket as HAMi-managed,
+// so the GPU Status page surfaces "HAMi" rather than mis-attributing
+// shared vGPUs to the vanilla NVIDIA plugin.
+func vendorOf(key string, allKeys map[string]bool) (vendor string, primary bool) {
 	k := strings.ToLower(key)
 	switch {
 	case strings.HasPrefix(k, "nvidia.com/"):
-		// HAMi exposes nvidia.com/gpualloc + gpucores + gpumem on the same
-		// node; gpualloc is the slot count, the others are quantities. When
-		// vanilla NVIDIA is in play we just have nvidia.com/gpu.
-		switch k {
-		case "nvidia.com/gpu", "nvidia.com/gpualloc":
+		// HAMi exposes gpualloc / gpucores / gpumem on the same node.
+		// gpualloc is the slot count when present; otherwise nvidia.com/gpu
+		// IS the HAMi slot count (HAMi 2.x re-uses the vanilla key).
+		// Vanilla NVIDIA plugin alone only exposes nvidia.com/gpu.
+		hamiManaged := allKeys["nvidia.com/gpualloc"] ||
+			allKeys["nvidia.com/gpucores"] ||
+			allKeys["nvidia.com/gpumem"]
+		if hamiManaged {
+			switch k {
+			case "nvidia.com/gpualloc":
+				return "HAMi", true
+			case "nvidia.com/gpu":
+				// gpu is the primary slot count when gpualloc isn't around.
+				return "HAMi", !allKeys["nvidia.com/gpualloc"]
+			}
+			return "HAMi", false
+		}
+		if k == "nvidia.com/gpu" {
 			return "NVIDIA", true
 		}
 		return "NVIDIA", false
@@ -225,9 +246,17 @@ func vendorOf(key string) (vendor string, primary bool) {
 // double-counting HAMi's auxiliary cores/mem keys), but byKey carries every
 // key so the UI can drill down.
 func groupByVendor(keys []string, alloc, used map[string]int64) []VendorSummary {
+	// Build a lowercase set of every resource key in play so vendorOf can
+	// disambiguate nvidia.com/gpu (vanilla vs. HAMi-managed) by looking
+	// for HAMi's auxiliary keys on the same cluster. We lowercase to
+	// match the comparison side, since vendorOf normalises the key.
+	keySet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		keySet[strings.ToLower(k)] = true
+	}
 	bucket := map[string]*VendorSummary{}
 	for _, k := range keys {
-		vendor, primary := vendorOf(k)
+		vendor, primary := vendorOf(k, keySet)
 		v, ok := bucket[vendor]
 		if !ok {
 			v = &VendorSummary{Vendor: vendor, ByKey: map[string]Counts{}}

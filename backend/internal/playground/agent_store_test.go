@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 func TestMemoryAgentStoreScopesSessionsByOwner(t *testing.T) {

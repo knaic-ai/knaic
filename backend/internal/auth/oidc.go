@@ -12,10 +12,36 @@ import (
 )
 
 type Verifier struct {
-	v          *oidc.IDTokenVerifier
-	adminGroup string
-	client     *http.Client
-	disabled   bool
+	v             *oidc.IDTokenVerifier
+	adminGroup    string
+	client        *http.Client
+	disabled      bool
+	adminResolver *AdminResolver
+	// grants is an optional fallback auth path for requests that can't
+	// carry an Authorization header — specifically the in-iframe viewer
+	// proxy used by the AI Storage PVC manager. nil means "bearer only".
+	grants *GrantStore
+}
+
+// SetGrantStore wires a grant cookie fallback into the verifier.
+// Attached post-construction so the same store can be shared with
+// handlers that mint grants (no circular import).
+func (v *Verifier) SetGrantStore(g *GrantStore) {
+	if v == nil {
+		return
+	}
+	v.grants = g
+}
+
+// SetAdminResolver wires an apiserver-backed CRB resolver. Attached after
+// construction because the k8s client isn't built yet when auth.New runs.
+// Passing nil is a no-op; the verifier falls back to group-claim-only
+// admin detection.
+func (v *Verifier) SetAdminResolver(r *AdminResolver) {
+	if v == nil {
+		return
+	}
+	v.adminResolver = r
 }
 
 // New builds a verifier. If issuer is empty and disabled is true, returns a
@@ -67,6 +93,18 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 		}
 		raw := bearer(r)
 		if raw == "" {
+			// Fallback: grant cookies. Used by the per-PVC viewer
+			// iframe (and any other in-browser embed that can't set
+			// Authorization). The grant carries its own scope check,
+			// so a cookie minted for /aistorage/pvc/foo/viewer/ can't
+			// authenticate /api/v1/whoami.
+			if v.grants != nil {
+				u, err := v.grants.FromRequest(r)
+				if err == nil && u != nil {
+					next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), u)))
+					return
+				}
+			}
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
@@ -94,6 +132,14 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 			Name:            name,
 			Groups:          c.Groups,
 			IsPlatformAdmin: slices.Contains(c.Groups, v.adminGroup),
+		}
+		// Group claim is the fast path; CRB lookup is the additive one for
+		// users bound to cluster-admin as a User subject rather than via a
+		// group.
+		if !u.IsPlatformAdmin && v.adminResolver != nil {
+			if v.adminResolver.IsAdmin(r.Context(), u) {
+				u.IsPlatformAdmin = true
+			}
 		}
 		ctx := WithUser(r.Context(), u)
 		ctx = WithBearer(ctx, raw)

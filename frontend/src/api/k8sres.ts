@@ -28,7 +28,9 @@ export type ClusterSlug =
   | 'gatewayclasses'
   | 'clusterservingruntimes'
   | 'clusterstoragecontainers'
-  | 'clustertrainingruntimes';
+  | 'clustertrainingruntimes'
+  | 'localmodelnodegroups'
+  | 'localmodelcaches';
 
 export function listNamespaced<T>(slug: Slug, ns: string, signal?: AbortSignal): Promise<T[]> {
   return request<T[]>(`/api/v1/namespaces/${encodeURIComponent(ns)}/${slug}`, { signal });

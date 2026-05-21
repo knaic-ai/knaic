@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Empty, Input, List, Select, Space, Tag, Tooltip } from 'antd';
+import { App, Button, Card, Empty, Input, List, Select, Space, Tag, theme, Tooltip } from 'antd';
 import {
   ClearOutlined,
   DeleteOutlined,
@@ -47,6 +47,10 @@ export function Agent() {
   const { namespace } = useApp();
   const providers = useProviders();
   const { message } = App.useApp();
+  // controlItemBgActive flips with light/dark mode, unlike the hard-coded
+  // #eef5ff fallback that was here before — dark theme rendered the
+  // selected row as a near-white wash that hid the title text.
+  const { token } = theme.useToken();
   const [providerId, setProviderId] = useState(providers[0]?.id ?? '');
   const [input, setInput] = useState('');
   const [sessions, setSessions] = useState<AgentSession[]>([]);
@@ -284,7 +288,7 @@ export function Agent() {
                     ]}
                     style={{
                       cursor: 'pointer',
-                      background: item.id === sessionId ? 'var(--knaic-hover, #eef5ff)' : undefined,
+                      background: item.id === sessionId ? token.controlItemBgActive : undefined,
                       paddingInline: 8,
                     }}
                     onClick={() => setSessionId(item.id)}
