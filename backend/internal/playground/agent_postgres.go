@@ -134,9 +134,9 @@ func (s *PostgresAgentStore) CreateSession(ctx context.Context, session AgentSes
 	if session.ID == "" {
 		session.ID = newID("agent")
 	}
-	if session.OpenCodeSession == "" {
-		session.OpenCodeSession = session.ID
-	}
+	// OpenCodeSession is populated lazily by OpenCodeServerRunner on first
+	// POST /session, then persisted via SetOpenCodeSession. See the matching
+	// note in MemoryAgentStore.CreateSession.
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = now
 	}
@@ -185,6 +185,23 @@ func (s *PostgresAgentStore) GetSession(ctx context.Context, owner, id string) (
 
 func (s *PostgresAgentStore) DeleteSession(ctx context.Context, owner, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM knaic_agent_sessions WHERE owner = $1 AND id = $2`, owner, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresAgentStore) SetOpenCodeSession(ctx context.Context, sessionID, openCodeID string) error {
+	res, err := s.db.ExecContext(
+		ctx,
+		`UPDATE knaic_agent_sessions SET opencode_session_id = $2, updated_at = $3 WHERE id = $1`,
+		sessionID,
+		openCodeID,
+		time.Now().UTC(),
+	)
 	if err != nil {
 		return err
 	}

@@ -22,7 +22,8 @@ This is the first vertical slice. Implemented:
 | Training runtimes / TrainJobs / MLflow metrics | ✅ structured create + MLflow proxy |
 | Notebooks | ✅ create/start/stop + optional PVC creation |
 | Admin: nodes, namespaces, quotas, RBAC, observed users | ✅ |
-| Monitoring | ✅ Prometheus `query_range` proxy with dev synthetic fallback |
+| Monitoring | ✅ Prometheus `query_range` proxy + bundled `llm` / `training` endpoints with dev synthetic fallback |
+| Storage targets (Model Hub picker) | ✅ in-memory store + CRUD + builtin protection |
 | Playground | ✅ LLM provider registry + OpenAI-compatible chat/stream proxy + opencode-backed read-only agent |
 | Frontend wired to API | ✅ first slices wired; some new admin/monitoring/playground APIs are backend-ready |
 
@@ -124,21 +125,21 @@ If `KNAIC_PROMETHEUS_URL` is left empty the backend serves a deterministic synth
 
 #### Authenticating to the upstream
 
-By default knaic sends queries unauthenticated, which works when the upstream is reachable in-cluster without a gate. When the upstream is fronted by an `oauth2-proxy` sidecar — common with cpaas-deployed VictoriaMetrics — set:
+By default knaic sends queries unauthenticated, which works when the upstream is reachable in-cluster without a gate. When the upstream is fronted by an `oauth2-proxy` sidecar — a common deployment pattern for VictoriaMetrics — set:
 
 | Env var | Default | Notes |
 |---|---|---|
 | `KNAIC_PROMETHEUS_AUTH` | _(empty)_ | `forward` to forward the verified Dex bearer of the calling user; `bearer` to send a fixed token; empty for no header. |
 | `KNAIC_PROMETHEUS_BEARER` | _(empty)_ | Static bearer token. Used when `KNAIC_PROMETHEUS_AUTH=bearer`, or as a fallback when `forward` mode encounters a request with no caller token (background jobs etc.). |
 
-**Production with cpaas + same Dex provider.** Both knaic and the VM oauth2-proxy verify JWTs minted by the same Dex issuer. Configure oauth2-proxy with `--skip-jwt-bearer-tokens=true` (and the right `--oidc-issuer-url`) so it accepts an `Authorization: Bearer <jwt>` header instead of forcing a browser cookie flow. Then on the knaic side:
+**Production with a shared OIDC provider.** When both knaic and the VictoriaMetrics oauth2-proxy verify JWTs minted by the same OIDC issuer, configure oauth2-proxy with `--skip-jwt-bearer-tokens=true` (and the right `--oidc-issuer-url`) so it accepts an `Authorization: Bearer <jwt>` header instead of forcing a browser cookie flow. Then on the knaic side:
 
 ```bash
-KNAIC_PROMETHEUS_URL=http://vmselect.cpaas-system.svc.cluster.local:8481/select/multitenant/prometheus
+KNAIC_PROMETHEUS_URL=http://vmselect.monitoring.svc.cluster.local:8481/select/multitenant/prometheus
 KNAIC_PROMETHEUS_AUTH=forward
 ```
 
-Each `/api/v1/monitoring/query` request now reaches vmselect with the calling user's verified Dex JWT, so VM tenant ACLs and the user's group claims drive what they can read — exactly like every other read knaic forwards to the apiserver via impersonation.
+Each `/api/v1/monitoring/query` request now reaches vmselect with the calling user's verified JWT, so VM tenant ACLs and the user's group claims drive what they can read — exactly like every other read knaic forwards to the apiserver via impersonation.
 
 If you also want background / unauthenticated calls (none today, but e.g. a future warm-up job) to still authenticate, fill `KNAIC_PROMETHEUS_BEARER` with a long-lived service-account token.
 
@@ -167,7 +168,7 @@ If you also want background / unauthenticated calls (none today, but e.g. a futu
 | `KNAIC_CORS_ORIGINS` | dev defaults | comma-separated allow-list |
 | `KNAIC_DB_URL` | _(empty)_ | Postgres DSN for model metadata and Playground agent sessions; empty uses in-memory stores |
 | `KNAIC_PROMETHEUS_URL` | _(empty)_ | Prometheus-compatible base URL; empty uses deterministic synthetic dev series. See [Monitoring backends](#monitoring-backends) for VictoriaMetrics. |
-| `KNAIC_PROMETHEUS_AUTH` | _(empty)_ | `forward` forwards the user's verified Dex bearer to the upstream (use with cpaas-style oauth2-proxy + `--skip-jwt-bearer-tokens`); `bearer` sends `KNAIC_PROMETHEUS_BEARER`; empty sends no header. |
+| `KNAIC_PROMETHEUS_AUTH` | _(empty)_ | `forward` forwards the user's verified OIDC bearer to the upstream (use with an oauth2-proxy fronting the metrics endpoint with `--skip-jwt-bearer-tokens`); `bearer` sends `KNAIC_PROMETHEUS_BEARER`; empty sends no header. |
 | `KNAIC_PROMETHEUS_BEARER` | _(empty)_ | Static bearer for `KNAIC_PROMETHEUS_AUTH=bearer`, or fallback used by `forward` mode when no caller token is present. |
 | `KNAIC_OPENCODE_BIN` | `opencode` | opencode executable used by Playground Agent |
 | `KNAIC_AGENT_WORKDIR` | OS temp dir | base directory for generated opencode configs, state, and data |
@@ -194,6 +195,11 @@ POST   /api/v1/components/{name}/adopt       -> mark Unmanaged as ours [admin]
 GET    /api/v1/registry                      -> registry config
 PATCH  /api/v1/registry                      -> update config         [admin]
 POST   /api/v1/registry/sync                 -> mark all images synced [admin]
+
+GET    /api/v1/storage/targets               -> list storage targets
+POST   /api/v1/storage/targets               -> register a target      [admin]
+PATCH  /api/v1/storage/targets/{id}          -> update a target        [admin]
+DELETE /api/v1/storage/targets/{id}          -> remove a target        [admin]
 
 GET    /api/v1/models?scope=public|private&namespace=ns
 POST   /api/v1/models                        -> create metadata
@@ -239,6 +245,8 @@ PUT    /api/v1/admin/namespaces/{ns}/rolebindings/{name} [admin]
 DELETE /api/v1/admin/namespaces/{ns}/rolebindings/{name} [admin]
 
 GET    /api/v1/monitoring/query?scope=namespace&target=team-ml&resource=cpu&kind=usage
+GET    /api/v1/monitoring/llm?namespace=team-ml&service=qwen3-5-7b
+GET    /api/v1/monitoring/training?namespace=team-ml&job=llama3-finetune
 
 GET    /api/v1/playground/providers
 POST   /api/v1/playground/providers

@@ -7,8 +7,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/alauda/knaic-backend/internal/inference"
-	"github.com/alauda/knaic-backend/internal/k8sres"
+	"github.com/knaic/knaic-backend/internal/inference"
+	"github.com/knaic/knaic-backend/internal/k8sres"
 )
 
 type inferenceAPI struct {
@@ -29,6 +29,11 @@ func (a *inferenceAPI) routes(r chi.Router) {
 	r.Get("/services/{name}/pods", a.pods)
 	r.Post("/services/{name}/stop", a.stop)
 	r.Post("/services/{name}/start", a.start)
+	// Gateway plumbing — read the route+rate-limit picture for one service,
+	// and (admin/editor) provision an AIGatewayRoute + AIServiceBackend + a
+	// BackendTrafficPolicy in one call.
+	r.Get("/services/{name}/route-status", a.routeStatus)
+	r.Post("/services/{name}/gateway-route", a.createGatewayRoute)
 }
 
 // pods lists all pods backing an InferenceService / LLMInferenceService —
@@ -76,6 +81,111 @@ func (a *inferenceAPI) DeploymentModesHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+// GatewayConfigHandler returns the KServe gateway-related configuration
+// (ingress.enableGatewayApi, ingressDomain, the kserve-ingress-gateway
+// status, and whether the Envoy AI Gateway CRDs are present). The Inference
+// Services + Gateway pages call this to render the "how do I reach my
+// service?" banner and the Gateway page's status panel.
+//
+// Uses per-request impersonation so a non-admin still gets a usable result —
+// if RBAC blocks the configmap or the cluster-scoped Gateway, individual
+// fields fall back to zero values rather than 500'ing the page.
+func (a *inferenceAPI) GatewayConfigHandler(w http.ResponseWriter, r *http.Request) {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	cfg, err := svc.GatewayConfig(r.Context())
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// routeStatus returns the routes + rate limits that target an
+// InferenceService — used by the Inference Services list (per-row chip) and
+// the per-service detail page.
+func (a *inferenceAPI) routeStatus(w http.ResponseWriter, r *http.Request) {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	status, err := svc.ServiceRouteStatus(r.Context(), chi.URLParam(r, "namespace"), chi.URLParam(r, "name"))
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// createGatewayRoute provisions the Envoy-AI-Gateway resources for one
+// InferenceService. Returns the list of resources that were created /
+// updated so the UI can show them ("we created these CRs for you").
+func (a *inferenceAPI) createGatewayRoute(w http.ResponseWriter, r *http.Request) {
+	var req inference.CreateAIGatewayRouteRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	res, err := svc.CreateAIGatewayRoute(
+		r.Context(),
+		chi.URLParam(r, "namespace"),
+		chi.URLParam(r, "name"),
+		req,
+	)
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, res)
+}
+
+// LocalModelStatusHandler probes the KServe local-model-cache agent
+// DaemonSet so the UI can decide whether to render the management page or
+// an "install the agent first" empty state. Uses per-request impersonation
+// so the call respects the caller's RBAC; a non-admin without get/daemonsets
+// just sees installed=false (which collapses the page to read-only).
+func (a *inferenceAPI) LocalModelStatusHandler(w http.ResponseWriter, r *http.Request) {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	status, err := svc.LocalModelCacheStatus(r.Context())
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// LocalModelOptionsHandler returns the aggregated node-label key set plus
+// the cluster's StorageClass names so the NodeGroup form can render Selects
+// instead of free-text inputs. Uses per-request impersonation; non-admins
+// who can't list nodes/storageclasses just get empty arrays, which the UI
+// degrades to free-text.
+func (a *inferenceAPI) LocalModelOptionsHandler(w http.ResponseWriter, r *http.Request) {
+	svc, err := a.service(r)
+	if err != nil {
+		writeK8sClientError(w, err)
+		return
+	}
+	opts, err := svc.LocalModelOptions(r.Context())
+	if err != nil {
+		writeK8sError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, opts)
 }
 
 func (a *inferenceAPI) updateRuntime(w http.ResponseWriter, r *http.Request) {

@@ -2,25 +2,28 @@ package api
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
-	"github.com/alauda/knaic-backend/internal/admin"
-	"github.com/alauda/knaic-backend/internal/auth"
-	"github.com/alauda/knaic-backend/internal/components"
-	"github.com/alauda/knaic-backend/internal/gpu"
-	"github.com/alauda/knaic-backend/internal/inference"
-	"github.com/alauda/knaic-backend/internal/k8s"
-	"github.com/alauda/knaic-backend/internal/k8sres"
-	"github.com/alauda/knaic-backend/internal/models"
-	"github.com/alauda/knaic-backend/internal/monitoring"
-	"github.com/alauda/knaic-backend/internal/notebook"
-	"github.com/alauda/knaic-backend/internal/playground"
-	"github.com/alauda/knaic-backend/internal/registry"
-	"github.com/alauda/knaic-backend/internal/training"
+	"github.com/knaic/knaic-backend/internal/admin"
+	"github.com/knaic/knaic-backend/internal/agentworkspace"
+	"github.com/knaic/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/collections"
+	"github.com/knaic/knaic-backend/internal/components"
+	"github.com/knaic/knaic-backend/internal/gpu"
+	"github.com/knaic/knaic-backend/internal/inference"
+	"github.com/knaic/knaic-backend/internal/k8s"
+	"github.com/knaic/knaic-backend/internal/k8sres"
+	"github.com/knaic/knaic-backend/internal/models"
+	"github.com/knaic/knaic-backend/internal/monitoring"
+	"github.com/knaic/knaic-backend/internal/notebook"
+	"github.com/knaic/knaic-backend/internal/playground"
+	"github.com/knaic/knaic-backend/internal/publish"
+	"github.com/knaic/knaic-backend/internal/registry"
+	"github.com/knaic/knaic-backend/internal/storage"
+	"github.com/knaic/knaic-backend/internal/training"
 )
 
 type Deps struct {
@@ -28,6 +31,12 @@ type Deps struct {
 	AuthProxy       *auth.Proxy
 	AuthConfig      AuthConfig
 	AuthDisabled    bool
+	// GrantStore mints short-lived auth grants that get carried via
+	// HttpOnly cookies. Used by the AI Storage PVC viewer iframe, since
+	// `<iframe src=...>` requests can't set an Authorization header.
+	// When nil the viewer grant endpoint returns 503 and the proxy
+	// requires bearer auth like everything else.
+	GrantStore      *auth.GrantStore
 	K8s             *k8s.Clients
 	UserClaim       string // OIDC claim used as the impersonated apiserver username
 	UserPrefix      string // optional prefix prepended to the impersonated username
@@ -35,16 +44,30 @@ type Deps struct {
 	GPU             *gpu.Service
 	GPUProfiles     *gpu.ProfileStore
 	Registry        *registry.Store
+	Storage         *storage.Store
 	K8sRes          *k8sres.Service
 	Admin           *admin.Service
+	AgentWorkspace  *agentworkspace.Service
 	Inference       *inference.Service
 	Notebook        *notebook.Service
 	Models          *models.Service
+	Collections     *collections.Service
+	Publish         *publish.Service
 	Training        *training.Service
 	Monitoring      *monitoring.Service
 	Playground      *playground.Service
 	AgentAPIBaseURL string
-	CORSOrigins     []string
+	// InternalToken authenticates calls from the opencode sidecar to the
+	// /api/v1/internal/openai/v1 proxy. Empty disables the route entirely.
+	InternalToken string
+	CORSOrigins   []string
+	// StaticDir, when non-empty, makes the API binary also serve the React
+	// build under /. Populated by the Docker image; empty in the local
+	// `make run` workflow (where the frontend lives at vite :4300).
+	StaticDir string
+	// ClusterInfo is the static cluster identity surfaced at
+	// /api/v1/cluster-info. Empty fields render as a placeholder in the UI.
+	ClusterInfo ClusterInfo
 }
 
 type AuthConfig struct {
@@ -60,7 +83,14 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Timeout(60 * time.Second))
+	// chimw.Timeout is intentionally NOT applied globally. It runs the
+	// handler in a goroutine and tries to write a 504 once the deadline
+	// fires; for SSE streams (playground chat/stream, agent runs) the
+	// upstream LLM legitimately holds the response for tens of seconds,
+	// the handler has already flushed 200 + body, and the late
+	// WriteHeader(504) shows up in the log as "superfluous response.
+	// WriteHeader call". Slowloris is covered by Server.ReadHeaderTimeout
+	// in main.go; per-handler deadlines should use r.Context() directly.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   originsOrAll(d.CORSOrigins),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -79,6 +109,11 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Internal proxy for the opencode sidecar. Mounted before the OIDC
+		// gate so a bearer-less sidecar can reach it; gated by a per-process
+		// shared token instead.
+		mountInternalOpenAI(r, d.Playground, d.InternalToken)
+
 		r.Get("/auth/config", func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusOK, d.AuthConfig)
 		})
@@ -101,11 +136,9 @@ func NewRouter(d Deps) http.Handler {
 			})
 
 			// Cluster identity (cluster name + platform URL) for the
-			// header bar. Sourced from kube-public/global-info, which is
-			// safe for any authenticated user to read.
-			if d.K8s != nil {
-				r.Get("/cluster-info", newClusterInfoHandler(d.K8s.Typed))
-			}
+			// header bar. Values come from KNAIC_CLUSTER_NAME /
+			// KNAIC_PLATFORM_URL at process start.
+			r.Get("/cluster-info", newClusterInfoHandler(d.ClusterInfo))
 
 			r.Route("/components", func(r chi.Router) {
 				// Read paths are open to any authenticated user; mutations
@@ -137,6 +170,12 @@ func NewRouter(d Deps) http.Handler {
 				})
 			})
 
+			if d.Storage != nil {
+				r.Route("/storage", func(r chi.Router) {
+					newStorageAPI(d.Storage).routes(r)
+				})
+			}
+
 			if d.K8sRes != nil {
 				newK8sresAPI(d.K8sRes, newK8sClientSource(d)).routes(r)
 			}
@@ -154,6 +193,16 @@ func NewRouter(d Deps) http.Handler {
 					newAdminAPI(d.Admin).routes(r)
 				})
 			}
+			if d.K8s != nil {
+				// AI Storage is namespaced. Wired only when we have a real
+				// k8s client bundle; gated per-request via apiserver
+				// impersonation (write paths additionally require
+				// platform-admin — see internal/api/aistorage.go).
+				aiAPI := newAIStorageAPI(newK8sClientSource(d), d.GrantStore)
+				r.Route("/namespaces/{namespace}/aistorage", func(r chi.Router) {
+					aiAPI.routes(r)
+				})
+			}
 			if d.Inference != nil {
 				infAPI := newInferenceAPI(d.Inference, newK8sClientSource(d))
 				r.Route("/namespaces/{namespace}/inference", func(r chi.Router) {
@@ -165,6 +214,17 @@ func NewRouter(d Deps) http.Handler {
 				// configmap + Knative discovery.
 				r.Get("/inference/llm-configs", infAPI.LLMConfigsHandler)
 				r.Get("/inference/deployment-modes", infAPI.DeploymentModesHandler)
+				r.Get("/inference/gateway", infAPI.GatewayConfigHandler)
+				r.Get("/inference/localmodel/status", infAPI.LocalModelStatusHandler)
+				r.Get("/inference/localmodel/options", infAPI.LocalModelOptionsHandler)
+			}
+			if d.AgentWorkspace != nil {
+				// Per-user Codex Web workspace (lifecycle + reverse
+				// proxy). Singleton-per-caller; the workspace name is
+				// derived from the OIDC identity inside the handler.
+				r.Route("/me/workspace", func(r chi.Router) {
+					newAgentWorkspaceAPI(d.AgentWorkspace, d.GrantStore).routes(r)
+				})
 			}
 			if d.Notebook != nil {
 				// Mounted under singular "notebook" so it doesn't shadow the
@@ -176,7 +236,21 @@ func NewRouter(d Deps) http.Handler {
 			}
 			if d.Models != nil {
 				r.Route("/models", func(r chi.Router) {
-					newModelsAPI(d.Models).routes(r)
+					mapi := newModelsAPI(d.Models)
+					if d.K8s != nil {
+						mapi = mapi.withK8sSource(newK8sClientSource(d))
+					}
+					mapi.routes(r)
+				})
+			}
+			if d.Collections != nil {
+				r.Route("/collections", func(r chi.Router) {
+					newCollectionsAPI(d.Collections).routes(r)
+				})
+			}
+			if d.Publish != nil {
+				r.Route("/model-publish-requests", func(r chi.Router) {
+					newPublishAPI(d.Publish).routes(r)
 				})
 			}
 			if d.Training != nil {
@@ -213,6 +287,14 @@ func NewRouter(d Deps) http.Handler {
 			}
 		})
 	})
+
+	// Static UI: only mounted when StaticDir points at a real index.html.
+	// chi falls through to NotFound for anything that didn't match an API
+	// or probe route above; the static handler then serves the React bundle
+	// with SPA fallback semantics.
+	if h := staticHandler(d.StaticDir); h != nil {
+		r.NotFound(h.ServeHTTP)
+	}
 
 	return r
 }

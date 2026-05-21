@@ -1,21 +1,30 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Card, Row, Col, Table, Space, Button, App, Tag } from 'antd';
-import { CodeOutlined, DeleteOutlined } from '@ant-design/icons';
+import { CodeOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusTag } from '@/components/StatusTag';
 import { YamlViewer } from '@/components/YamlViewer';
+import { YamlEditor } from '@/components/YamlEditor';
 import {
   buildGatewayYaml,
   buildHTTPRouteYaml,
+  createClusterResource,
   deleteClusterResource,
   ensureGatewaysLoaded,
   fetchClusterResourceYaml,
+  gatewayTemplate,
+  httpRouteTemplate,
   useGateways,
   useHTTPRoutes,
   type Gateway,
   type HTTPRoute,
 } from '@/data/clusterResources';
 import { useApp } from '@/context/AppContext';
+
+// createKind picks which template + slug + label the YAML editor uses. Both
+// Gateway and HTTPRoute live on the same page, so a single editor with a
+// `kind` discriminator keeps the JSX flat.
+type CreateKind = 'gateways' | 'httproutes';
 
 export function Gateways() {
   const { namespace } = useApp();
@@ -25,6 +34,9 @@ export function Gateways() {
   const gwData = useMemo(() => gws.filter(g => g.namespace === namespace), [gws, namespace]);
   const routeData = useMemo(() => routes.filter(r => r.namespace === namespace), [routes, namespace]);
   const [yaml, setYaml] = useState<{ title: string; body: string } | null>(null);
+  const [createKind, setCreateKind] = useState<CreateKind | null>(null);
+  const [createYaml, setCreateYaml] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     ensureGatewaysLoaded(namespace);
@@ -40,6 +52,25 @@ export function Gateways() {
     }
   }
 
+  function openCreate(kind: CreateKind) {
+    setCreateKind(kind);
+    setCreateYaml(kind === 'gateways' ? gatewayTemplate(namespace) : httpRouteTemplate(namespace));
+  }
+
+  async function submitCreate() {
+    if (!createKind) return;
+    setCreating(true);
+    try {
+      await createClusterResource(createKind, namespace, createYaml);
+      message.success(createKind === 'gateways' ? 'Gateway created' : 'HTTPRoute created');
+      setCreateKind(null);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : 'Failed to create resource');
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <div className="knaic-page">
       <PageHeader
@@ -48,7 +79,16 @@ export function Gateways() {
       />
       <Row gutter={12}>
         <Col span={24}>
-          <Card title="Gateways" size="small" style={{ marginBottom: 12 }}>
+          <Card
+            title="Gateways"
+            size="small"
+            style={{ marginBottom: 12 }}
+            extra={
+              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => openCreate('gateways')}>
+                New Gateway
+              </Button>
+            }
+          >
             <Table<Gateway>
               rowKey="id"
               size="small"
@@ -108,7 +148,15 @@ export function Gateways() {
               ]}
             />
           </Card>
-          <Card title="HTTP Routes" size="small">
+          <Card
+            title="HTTP Routes"
+            size="small"
+            extra={
+              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => openCreate('httproutes')}>
+                New HTTPRoute
+              </Button>
+            }
+          >
             <Table<HTTPRoute>
               rowKey="id"
               size="small"
@@ -177,6 +225,15 @@ export function Gateways() {
         onClose={() => setYaml(null)}
         title={yaml?.title ?? ''}
         yaml={yaml?.body ?? ''}
+      />
+      <YamlEditor
+        open={!!createKind}
+        title={createKind === 'gateways' ? `New Gateway in ${namespace}` : `New HTTPRoute in ${namespace}`}
+        value={createYaml}
+        saving={creating}
+        onChange={setCreateYaml}
+        onSave={() => void submitCreate()}
+        onClose={() => setCreateKind(null)}
       />
     </div>
   );

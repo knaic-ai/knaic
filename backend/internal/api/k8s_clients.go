@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/alauda/knaic-backend/internal/auth"
-	"github.com/alauda/knaic-backend/internal/k8s"
+	"github.com/knaic/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/k8s"
 )
 
 var errNoK8sImpersonationIdentity = errors.New("no Kubernetes impersonation identity")

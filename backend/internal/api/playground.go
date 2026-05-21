@@ -10,8 +10,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/alauda/knaic-backend/internal/auth"
-	"github.com/alauda/knaic-backend/internal/playground"
+	"github.com/knaic/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/playground"
 )
 
 type playgroundAPI struct {

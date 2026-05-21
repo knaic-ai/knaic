@@ -54,9 +54,10 @@ func (s *MemoryAgentStore) CreateSession(_ context.Context, session AgentSession
 	if session.ID == "" {
 		session.ID = newID("agent")
 	}
-	if session.OpenCodeSession == "" {
-		session.OpenCodeSession = session.ID
-	}
+	// Leave OpenCodeSession empty: the OpenCodeServerRunner allocates it on
+	// first POST /session and writes it back via SetOpenCodeSession. The CLI
+	// runner doesn't pass --session anymore, so the previous "default to
+	// session.ID" no longer carries any meaning.
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = now
 	}
@@ -87,6 +88,19 @@ func (s *MemoryAgentStore) DeleteSession(_ context.Context, owner, id string) er
 	}
 	delete(s.sessions, id)
 	delete(s.messages, id)
+	return nil
+}
+
+func (s *MemoryAgentStore) SetOpenCodeSession(_ context.Context, sessionID, openCodeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return ErrNotFound
+	}
+	session.OpenCodeSession = openCodeID
+	session.UpdatedAt = time.Now().UTC()
+	s.sessions[sessionID] = session
 	return nil
 }
 

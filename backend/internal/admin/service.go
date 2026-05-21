@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 const quotaName = "knaic-quota"

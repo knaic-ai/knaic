@@ -9,6 +9,8 @@ import {
   AlertOutlined,
   ArrowRightOutlined,
   AppstoreOutlined,
+  CloudServerOutlined,
+  MessageOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { PageHeader } from '@/components/PageHeader';
@@ -96,11 +98,12 @@ export function Dashboard() {
     ? Math.round(((components.length - notInstalled.length) / components.length) * 100)
     : 0;
 
-  // Recent activity is sorted by createdAt desc so the latest TrainJob /
-  // InferenceService bubbles to the top — useful as a "what just happened"
-  // glance even when the user hasn't opened the dedicated page yet.
+  // Recent activity sorts the newest TrainJob / InferenceService to the top
+  // so users get a "what just happened" glance without opening the dedicated
+  // page. TrainJob carries startTime (its CR doesn't expose creation
+  // timestamp on the spec); InferenceService uses createdAt.
   const recentJobs = [...nsJobs]
-    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .sort((a, b) => (b.startTime ?? '').localeCompare(a.startTime ?? ''))
     .slice(0, 4);
   const recentServices = [...nsServices]
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
@@ -112,6 +115,7 @@ export function Dashboard() {
         title={`Welcome, ${user.name || 'there'}`}
         description={`Current workspace: ${namespace}${user.isPlatformAdmin ? ' · platform admin' : ''}`}
       />
+      <IntroBanner />
       {/* Top metric strip — 5 tiles wide on lg, wrapping on smaller. */}
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
         <Col xs={12} sm={8} lg={5}>
@@ -274,3 +278,97 @@ export function Dashboard() {
     </div>
   );
 }
+
+// IntroBanner is the brand-focused intro that sits at the top of the
+// dashboard. It explains what the console is and points at the four areas
+// users land in most often (Model Hub, Inference, Playground, Notebooks).
+//
+// Rendered for every user — there is no per-user dismiss state today; the
+// strip is short enough (~110 px) that it doesn't push the metrics below
+// the fold on standard laptop heights. If this ever becomes noisy we can
+// stash a dismissed flag in localStorage and render conditionally.
+function IntroBanner() {
+  return (
+    <Card
+      className="dashboard-intro"
+      style={{
+        marginBottom: 12,
+        background:
+          'linear-gradient(135deg, #2468f2 0%, #6b46f0 50%, #d946ef 100%)',
+        color: '#fff',
+        border: 'none',
+        overflow: 'hidden',
+      }}
+      styles={{ body: { padding: 20 } }}
+    >
+      <Row align="middle" gutter={[16, 12]}>
+        <Col xs={24} md={16}>
+          <Space size={10} style={{ marginBottom: 8 }}>
+            <RocketOutlined style={{ fontSize: 22 }} />
+            <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: 0.2 }}>
+              Kubernetes Native AI Console
+            </span>
+            <Tag color="rgba(255,255,255,0.18)" style={{ color: '#fff', border: 'none' }}>
+              knaic
+            </Tag>
+          </Space>
+          <div style={{ opacity: 0.92, lineHeight: 1.55 }}>
+            Build, serve and monitor LLM workloads on Kubernetes — models,
+            inference services, training jobs, notebooks and GPU usage in one
+            place. Click a button on the right to jump in, or use the sidebar.
+          </div>
+        </Col>
+        <Col xs={24} md={8}>
+          <Space wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
+            <Link to="/models/public">
+              <Button
+                type="default"
+                icon={<DatabaseOutlined />}
+                style={introButtonStyle}
+              >
+                Browse models
+              </Button>
+            </Link>
+            <Link to="/inference/services">
+              <Button
+                type="default"
+                icon={<CloudServerOutlined />}
+                style={introButtonStyle}
+              >
+                Inference
+              </Button>
+            </Link>
+            <Link to="/playground/chat">
+              <Button
+                type="default"
+                icon={<MessageOutlined />}
+                style={introButtonStyle}
+              >
+                Playground
+              </Button>
+            </Link>
+            <Link to="/notebooks">
+              <Button
+                type="default"
+                icon={<BookOutlined />}
+                style={introButtonStyle}
+              >
+                Notebooks
+              </Button>
+            </Link>
+          </Space>
+        </Col>
+      </Row>
+    </Card>
+  );
+}
+
+// Translucent white-on-gradient look so the buttons read as part of the
+// banner rather than competing with the cards below. Single shared style
+// keeps the four buttons visually consistent.
+const introButtonStyle: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.18)',
+  borderColor: 'rgba(255,255,255,0.35)',
+  color: '#fff',
+  fontWeight: 500,
+};

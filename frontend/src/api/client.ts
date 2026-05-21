@@ -8,10 +8,18 @@
 //
 // API mode is enabled by default so production same-origin deployments do not
 // accidentally bypass OIDC. Set VITE_KNAIC_API=disabled for prototype-only UI.
+//
+// Independent of API mode, VITE_KNAIC_SYNTHETIC=1 forces the LLM / TrainJob
+// monitoring pages and the Model Hub storage-target picker to use the local
+// in-browser synthetic generators instead of calling the backend. Useful for
+// pure-frontend prototyping when the backend is reachable but you don't want
+// the dashboards to hammer Prometheus or you want a deterministic shape.
+// Defaults to off, so production builds always go through the backend.
 
 declare global {
   interface Window {
     __KNAIC_API__?: string;
+    __KNAIC_SYNTHETIC__?: string | boolean;
   }
 }
 
@@ -24,6 +32,19 @@ const winBase = apiDisabled ? undefined : rawWinBase;
 export const apiBaseUrl: string = (envBase ?? winBase ?? '').replace(/\/+$/, '');
 
 export const apiEnabled: boolean = !apiDisabled;
+
+const rawEnvSynthetic = import.meta.env.VITE_KNAIC_SYNTHETIC as string | undefined;
+const rawWinSynthetic =
+  typeof window !== 'undefined' ? window.__KNAIC_SYNTHETIC__ : undefined;
+const truthy = (v: string | boolean | undefined) =>
+  v === true || v === '1' || v === 'true' || v === 'on';
+
+// syntheticMode is a separate axis from apiEnabled: a frontend can be in API
+// mode (apiEnabled=true) but still render the monitoring/storage views from
+// local synthetic data when this flag is on. When apiEnabled is false the
+// flag is implicit — there's no backend to call regardless.
+export const syntheticMode: boolean =
+  !apiEnabled || truthy(rawEnvSynthetic) || truthy(rawWinSynthetic);
 
 let bearerToken: string | null = null;
 let unauthorizedHandler: (() => void) | null = null;

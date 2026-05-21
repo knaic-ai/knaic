@@ -6,25 +6,38 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/alauda/knaic-backend/internal/auth"
-	"github.com/alauda/knaic-backend/internal/gpu"
-	"github.com/alauda/knaic-backend/internal/monitoring"
+	"github.com/knaic/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/gpu"
+	"github.com/knaic/knaic-backend/internal/monitoring"
 )
 
-// gpuAPI mounts the Monitoring → GPU Status endpoints. Cluster-scope reads
-// require platform-admin (they list every node + every pod cluster-wide);
-// namespace-scope is open to any authenticated user with read on pods in
-// that namespace — the apiserver enforces that for the impersonating
-// client knaic forwards on.
+// gpuAPI mounts the Monitoring → GPU Status endpoints.
+//
+//   - Cluster-scope, platform admin: SA-backed apiserver reads (every node
+//     + every pod cluster-wide, no per-user RBAC dependency).
+//   - Cluster-scope, non-admin: VictoriaMetrics-backed read of
+//     kube-state-metrics + node capacity. Non-admins can't list nodes
+//     cluster-wide via impersonation, so the apiserver path returns
+//     nothing; the monitoring path exposes the same numbers without
+//     leaking apiserver privileges.
+//   - Namespace-scope (any caller): apiserver via the impersonating client
+//     — Kubernetes RBAC enforces what the user can read.
 type gpuAPI struct {
 	source     k8sClientSource
-	saService  *gpu.Service // backend-SA backed, used for non-impersonated calls (admin)
+	saService  *gpu.Service           // backend-SA backed, admin cluster reads
+	monGPU     *gpu.MonitoringService // VM-backed, non-admin cluster reads
 	monitoring *monitoring.Service
 	profiles   *gpu.ProfileStore
 }
 
 func newGPUAPI(source k8sClientSource, saService *gpu.Service, mon *monitoring.Service, profiles *gpu.ProfileStore) *gpuAPI {
-	return &gpuAPI{source: source, saService: saService, monitoring: mon, profiles: profiles}
+	return &gpuAPI{
+		source:     source,
+		saService:  saService,
+		monGPU:     gpu.NewMonitoringService(mon),
+		monitoring: mon,
+		profiles:   profiles,
+	}
 }
 
 // listProfiles returns the cluster's GPU profile catalog. Open to any
@@ -96,8 +109,10 @@ func (a *gpuAPI) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// status routes the request to the SA-backed service for cluster scope
-// (admin only), or to an impersonating client for namespace scope.
+// status routes the request to the appropriate data source. See gpuAPI's
+// doc-comment for the matrix; in short: admins → apiserver via the SA;
+// non-admin cluster-scope → VictoriaMetrics; namespace-scope → apiserver
+// via impersonation.
 func (a *gpuAPI) status(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scope := q.Get("scope")
@@ -113,6 +128,19 @@ func (a *gpuAPI) status(w http.ResponseWriter, r *http.Request) {
 	isAdmin := u != nil && u.IsPlatformAdmin
 
 	opts := gpu.Options{Scope: scope, Namespace: target, IsAdmin: isAdmin}
+
+	// Non-admin + cluster scope is only feasible via monitoring: the
+	// impersonating client can't list nodes / pods cluster-wide.
+	if scope == "cluster" && !isAdmin && a.monGPU.Available() {
+		out, err := a.monGPU.Status(r.Context(), opts)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
 	svc, err := a.serviceFor(r, isAdmin)
 	if err != nil {
 		writeK8sClientError(w, err)

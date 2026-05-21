@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 var ErrNotFound = errors.New("provider not found")
@@ -25,7 +25,26 @@ type Service struct {
 	client      *http.Client
 	agentStore  AgentStore
 	agentRunner AgentRunner
+	// onProvidersChanged fires after every mutation to the provider set so
+	// the OpenCodeServerRunner can rewrite opencode.json and bounce the
+	// sidecar. Optional: nil means no subscriber, mutations proceed
+	// normally.
+	onProvidersChanged func()
+
+	// modelCache holds the result of GET ${endpoint}/v1/models per provider
+	// so we don't hammer the upstream on every chat. Invalidated on Patch /
+	// Delete; entries also expire after modelCacheTTL so a redeploy of the
+	// served model gets picked up without a backend restart.
+	modelCacheMu sync.Mutex
+	modelCache   map[string]modelCacheEntry
 }
+
+type modelCacheEntry struct {
+	models  []string
+	fetched time.Time
+}
+
+const modelCacheTTL = 5 * time.Minute
 
 func NewService() *Service {
 	return NewServiceWithAgentStore(NewMemoryAgentStore(), NewOpenCodeRunner(OpenCodeOptions{}))
@@ -43,6 +62,7 @@ func NewServiceWithAgentStore(store AgentStore, runner AgentRunner) *Service {
 		client:      &http.Client{Timeout: 60 * time.Second},
 		agentStore:  store,
 		agentRunner: runner,
+		modelCache:  map[string]modelCacheEntry{},
 	}
 }
 
@@ -53,6 +73,28 @@ func (s *Service) SetHTTPClient(client *http.Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.client = client
+}
+
+// SetProvidersChangedHook registers a callback fired after every mutation to
+// the provider set. The hook runs synchronously on the mutator's goroutine
+// so it must be fast (or push to a channel); see OpenCodeServerRunner for
+// the usage that motivated this.
+func (s *Service) SetProvidersChangedHook(fn func()) {
+	s.mu.Lock()
+	s.onProvidersChanged = fn
+	s.mu.Unlock()
+}
+
+// notifyProvidersChanged is called by mutation methods with s.mu UNLOCKED so
+// the hook can take its own locks (e.g. snapshotProviders) without
+// deadlocking against the writer.
+func (s *Service) notifyProvidersChanged() {
+	s.mu.RLock()
+	fn := s.onProvidersChanged
+	s.mu.RUnlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 func (s *Service) ListProviders(_ context.Context, namespace string) []Provider {
@@ -83,7 +125,6 @@ func (s *Service) CreateProvider(_ context.Context, req ProviderRequest) (Provid
 		return Provider{}, fmt.Errorf("invalid endpoint: %w", err)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.counter++
 	p := Provider{
 		ID:          fmt.Sprintf("llm-%06d", s.counter),
@@ -97,14 +138,16 @@ func (s *Service) CreateProvider(_ context.Context, req ProviderRequest) (Provid
 		Status:      req.Status,
 	}
 	s.providers[p.ID] = p
+	s.mu.Unlock()
+	s.notifyProvidersChanged()
 	return redactProvider(p), nil
 }
 
 func (s *Service) PatchProvider(_ context.Context, id string, patch ProviderPatch) (Provider, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	p, ok := s.providers[id]
 	if !ok {
+		s.mu.Unlock()
 		return Provider{}, ErrNotFound
 	}
 	if patch.Name != nil {
@@ -118,6 +161,7 @@ func (s *Service) PatchProvider(_ context.Context, id string, patch ProviderPatc
 	}
 	if patch.Endpoint != nil {
 		if _, err := url.ParseRequestURI(*patch.Endpoint); err != nil {
+			s.mu.Unlock()
 			return Provider{}, fmt.Errorf("invalid endpoint: %w", err)
 		}
 		p.Endpoint = strings.TrimRight(*patch.Endpoint, "/")
@@ -135,16 +179,22 @@ func (s *Service) PatchProvider(_ context.Context, id string, patch ProviderPatc
 		p.Status = *patch.Status
 	}
 	s.providers[id] = p
+	s.invalidateModelCache(id)
+	s.mu.Unlock()
+	s.notifyProvidersChanged()
 	return redactProvider(p), nil
 }
 
 func (s *Service) DeleteProvider(_ context.Context, id string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.providers[id]; !ok {
+		s.mu.Unlock()
 		return ErrNotFound
 	}
 	delete(s.providers, id)
+	s.invalidateModelCache(id)
+	s.mu.Unlock()
+	s.notifyProvidersChanged()
 	return nil
 }
 
@@ -153,7 +203,8 @@ func (s *Service) Chat(ctx context.Context, req ChatRequest) (ChatResponse, erro
 	if err != nil {
 		return ChatResponse{}, err
 	}
-	httpReq, err := newChatHTTPRequest(ctx, provider, req, false)
+	model := s.resolveModel(ctx, provider, client)
+	httpReq, err := newChatHTTPRequest(ctx, provider, model, req, false)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -184,7 +235,8 @@ func (s *Service) StreamChat(ctx context.Context, req ChatRequest) (ChatStream, 
 	if err != nil {
 		return ChatStream{}, err
 	}
-	httpReq, err := newChatHTTPRequest(ctx, provider, req, true)
+	model := s.resolveModel(ctx, provider, client)
+	httpReq, err := newChatHTTPRequest(ctx, provider, model, req, true)
 	if err != nil {
 		return ChatStream{}, err
 	}
@@ -270,13 +322,14 @@ func (s *Service) RunAgent(ctx context.Context, u *auth.User, sessionID string, 
 	namespace := firstNonEmpty(runCtx.Namespace, session.Namespace)
 	var final strings.Builder
 	err = s.agentRunner.Run(ctx, AgentRunnerRequest{
-		SessionID:  session.OpenCodeSession,
-		Message:    msg,
-		Provider:   provider,
-		UserToken:  runCtx.UserToken,
-		Namespace:  namespace,
-		Skills:     session.Skills,
-		APIBaseURL: runCtx.APIBaseURL,
+		SessionID:       session.ID,
+		OpenCodeSession: session.OpenCodeSession,
+		Message:         msg,
+		Provider:        provider,
+		UserToken:       runCtx.UserToken,
+		Namespace:       namespace,
+		Skills:          session.Skills,
+		APIBaseURL:      runCtx.APIBaseURL,
 	}, func(ev AgentEvent) {
 		if ev.Kind == "final" {
 			final.WriteString(ev.Text)
@@ -294,12 +347,15 @@ func (s *Service) RunAgent(ctx context.Context, u *auth.User, sessionID string, 
 	return nil
 }
 
-func newChatHTTPRequest(ctx context.Context, provider Provider, req ChatRequest, stream bool) (*http.Request, error) {
+func newChatHTTPRequest(ctx context.Context, provider Provider, model string, req ChatRequest, stream bool) (*http.Request, error) {
 	if len(req.Messages) == 0 {
 		return nil, errors.New("messages are required")
 	}
+	if model == "" {
+		model = provider.Model
+	}
 	body := map[string]any{
-		"model":    provider.Model,
+		"model":    model,
 		"messages": req.Messages,
 	}
 	if stream {
@@ -332,6 +388,97 @@ func newChatHTTPRequest(ctx context.Context, provider Provider, req ChatRequest,
 func redactProvider(p Provider) Provider {
 	p.APIKey = ""
 	return p
+}
+
+// resolveModel decides which model id to put in the request body.
+//
+// The configured provider.Model is the user's stated preference (the
+// InferenceService name in the discover() flow), but vLLM / SGLang only
+// accept whatever was passed to --served-model-name at boot. When the two
+// don't match the upstream returns 404. resolveModel asks the upstream
+// what it actually serves via GET /v1/models and substitutes when needed.
+//
+// Failures (network / 404 / no models) fall back to the configured value
+// — single-model deployments without /v1/models still work, and the
+// caller still sees the upstream's original error rather than a confusing
+// resolver-side one.
+func (s *Service) resolveModel(ctx context.Context, provider Provider, client *http.Client) string {
+	models := s.modelsFor(ctx, provider, client)
+	if len(models) == 0 {
+		return provider.Model
+	}
+	for _, m := range models {
+		if m == provider.Model {
+			return provider.Model
+		}
+	}
+	return models[0]
+}
+
+func (s *Service) modelsFor(ctx context.Context, provider Provider, client *http.Client) []string {
+	s.modelCacheMu.Lock()
+	if entry, ok := s.modelCache[provider.ID]; ok && time.Since(entry.fetched) < modelCacheTTL {
+		s.modelCacheMu.Unlock()
+		return entry.models
+	}
+	s.modelCacheMu.Unlock()
+
+	// Use a tighter timeout for the discovery hop than the chat client's
+	// 60s — model listing is dirt cheap when it works, and we don't want
+	// to stall the chat path on a hung upstream.
+	discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	models, err := fetchUpstreamModels(discoveryCtx, provider, client)
+	if err != nil || len(models) == 0 {
+		return nil
+	}
+
+	s.modelCacheMu.Lock()
+	s.modelCache[provider.ID] = modelCacheEntry{models: models, fetched: time.Now()}
+	s.modelCacheMu.Unlock()
+	return models
+}
+
+func (s *Service) invalidateModelCache(id string) {
+	s.modelCacheMu.Lock()
+	delete(s.modelCache, id)
+	s.modelCacheMu.Unlock()
+}
+
+// fetchUpstreamModels does a GET ${endpoint}/models. The OpenAI / vLLM /
+// SGLang / TGI shape is `{"data": [{"id": "..."}, ...]}` — we accept the
+// minimum required to extract ids and ignore the rest.
+func fetchUpstreamModels(ctx context.Context, provider Provider, client *http.Client) ([]string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, provider.Endpoint+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if provider.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	}
+	res, err := client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("/v1/models: HTTP %d", res.StatusCode)
+	}
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(body.Data))
+	for _, m := range body.Data {
+		if m.ID != "" {
+			out = append(out, m.ID)
+		}
+	}
+	return out, nil
 }
 
 type openAIResponse struct {

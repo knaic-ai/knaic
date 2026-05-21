@@ -127,26 +127,59 @@ func nodesFor(o *unstructured.Unstructured) int64 {
 
 // firstReplicatedJobContainer drills into the JobSet template embedded in the
 // runtime spec to surface the trainer container's image + resource hints.
+// With pre-jobs (dataset/model initializers) sharing the replicatedJob list,
+// the "first" replicatedJob isn't necessarily the trainer — we prefer the
+// one carrying the `trainer.kubeflow.org/trainjob-ancestor-step: trainer`
+// label, then fall back to one named "node" or "trainer", then the last
+// entry (matches the dependsOn chain knaic emits), and finally the very
+// first as a last resort for legacy runtimes.
 func firstReplicatedJobContainer(o *unstructured.Unstructured) (image, cpu, memory string, gpu int64) {
 	jobs, _, _ := unstructured.NestedSlice(o.Object, "spec", "template", "spec", "replicatedJobs")
-	for _, raw := range jobs {
-		m, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		c, ok := nestedFirstContainer(m, "template", "spec", "template", "spec", "containers")
-		if !ok || c == nil {
-			continue
-		}
-		image, _, _ = unstructured.NestedString(c, "image")
-		cpu, _, _ = unstructured.NestedString(c, "resources", "limits", "cpu")
-		memory, _, _ = unstructured.NestedString(c, "resources", "limits", "memory")
-		if v, ok, _ := unstructured.NestedInt64(c, "resources", "limits", "nvidia.com/gpu"); ok {
-			gpu = v
-		} else if s, ok, _ := unstructured.NestedString(c, "resources", "limits", "nvidia.com/gpu"); ok {
-			gpu = parseInt64Quantity(s)
-		}
+	if len(jobs) == 0 {
 		return
+	}
+	pickJob := func() map[string]any {
+		var named, last map[string]any
+		for _, raw := range jobs {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			last = m
+			label, _, _ := unstructured.NestedString(m, "template", "metadata", "labels", "trainer.kubeflow.org/trainjob-ancestor-step")
+			if label == "trainer" {
+				return m
+			}
+			if name, _, _ := unstructured.NestedString(m, "name"); name == "node" || name == "trainer" {
+				if named == nil {
+					named = m
+				}
+			}
+		}
+		if named != nil {
+			return named
+		}
+		if last != nil {
+			return last
+		}
+		m, _ := jobs[0].(map[string]any)
+		return m
+	}
+	m := pickJob()
+	if m == nil {
+		return
+	}
+	c, ok := nestedFirstContainer(m, "template", "spec", "template", "spec", "containers")
+	if !ok || c == nil {
+		return
+	}
+	image, _, _ = unstructured.NestedString(c, "image")
+	cpu, _, _ = unstructured.NestedString(c, "resources", "limits", "cpu")
+	memory, _, _ = unstructured.NestedString(c, "resources", "limits", "memory")
+	if v, ok, _ := unstructured.NestedInt64(c, "resources", "limits", "nvidia.com/gpu"); ok {
+		gpu = v
+	} else if s, ok, _ := unstructured.NestedString(c, "resources", "limits", "nvidia.com/gpu"); ok {
+		gpu = parseInt64Quantity(s)
 	}
 	return
 }

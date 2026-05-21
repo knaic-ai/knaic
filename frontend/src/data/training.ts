@@ -275,6 +275,7 @@ export async function createTrainingRuntime(ns: string, req: CreateRuntimeReques
     reloadTrainingRuntimes(ns);
     return;
   }
+  const gpuTotal = Object.values(req.gpuValues ?? {}).reduce((s, v) => s + v, 0);
   trainingRuntimesStore.set(prev => [
     {
       id: uid('tr'),
@@ -283,7 +284,11 @@ export async function createTrainingRuntime(ns: string, req: CreateRuntimeReques
       framework: req.framework as TrainingFramework,
       image: req.image,
       numNodes: req.numNodes,
-      resourcesPerNode: { cpu: req.cpuLimit ?? '', memory: req.memoryLimit ?? '', gpu: req.gpuLimit ?? 0 },
+      resourcesPerNode: {
+        cpu: req.cpuLimit ?? req.cpuRequest ?? '',
+        memory: req.memoryLimit ?? req.memoryRequest ?? '',
+        gpu: gpuTotal,
+      },
       createdAt: new Date().toISOString().slice(0, 10),
       builtin: false,
     },
@@ -338,10 +343,62 @@ export async function deleteTrainJob(ns: string, job: TrainJob): Promise<void> {
 }
 
 function trainingRuntimeObject(req: CreateRuntimeRequest) {
+  // Build resource map. Limits default to requests; GPU values go on both
+  // sides (Kubernetes requires extended resources to appear in limits).
+  const requests: Record<string, string | number> = {};
   const limits: Record<string, string | number> = {};
-  if (req.cpuLimit) limits.cpu = req.cpuLimit;
-  if (req.memoryLimit) limits.memory = req.memoryLimit;
-  if (req.gpuLimit) limits['nvidia.com/gpu'] = req.gpuLimit;
+  if (req.cpuRequest) requests.cpu = req.cpuRequest;
+  if (req.memoryRequest) requests.memory = req.memoryRequest;
+  if (req.cpuLimit ?? req.cpuRequest) limits.cpu = (req.cpuLimit ?? req.cpuRequest)!;
+  if (req.memoryLimit ?? req.memoryRequest) limits.memory = (req.memoryLimit ?? req.memoryRequest)!;
+  for (const [k, v] of Object.entries(req.gpuValues ?? {})) {
+    requests[k] = v;
+    limits[k] = v;
+  }
+
+  const trainerContainer: Record<string, unknown> = { name: 'node', image: req.image };
+  if (req.command?.length) trainerContainer.command = req.command;
+  if (req.args?.length) trainerContainer.args = req.args;
+  if (req.env?.length) trainerContainer.env = req.env;
+  trainerContainer.resources = { requests, limits };
+
+  // Pre-jobs: each becomes a sibling replicatedJob named after the step,
+  // with a dependsOn chain so they run in order. The Kubeflow Trainer v2
+  // controller looks at the trainer.kubeflow.org/trainjob-ancestor-step
+  // label on the replicatedJob template to identify the step. The trainer
+  // ("node") depends on the last pre-job.
+  const replicatedJobs: Record<string, unknown>[] = [];
+  let lastStep: string | undefined;
+  for (const p of req.preJobs ?? []) {
+    const container: Record<string, unknown> = { name: p.name, image: p.image };
+    if (p.command?.length) container.command = p.command;
+    if (p.args?.length) container.args = p.args;
+    if (p.env?.length) container.env = p.env;
+    const job: Record<string, unknown> = {
+      name: p.name,
+      template: {
+        metadata: { labels: { 'trainer.kubeflow.org/trainjob-ancestor-step': p.name } },
+        spec: { template: { spec: { containers: [container] } } },
+      },
+    };
+    if (lastStep) {
+      job.dependsOn = [{ name: lastStep, status: 'Complete' }];
+    }
+    replicatedJobs.push(job);
+    lastStep = p.name;
+  }
+  const trainerJob: Record<string, unknown> = {
+    name: 'node',
+    template: {
+      metadata: { labels: { 'trainer.kubeflow.org/trainjob-ancestor-step': 'trainer' } },
+      spec: { template: { spec: { containers: [trainerContainer] } } },
+    },
+  };
+  if (lastStep) {
+    trainerJob.dependsOn = [{ name: lastStep, status: 'Complete' }];
+  }
+  replicatedJobs.push(trainerJob);
+
   return {
     apiVersion: 'trainer.kubeflow.org/v1alpha1',
     kind: 'ClusterTrainingRuntime',
@@ -351,22 +408,7 @@ function trainingRuntimeObject(req: CreateRuntimeRequest) {
     },
     spec: {
       mlPolicy: { numNodes: req.numNodes || 1, [req.framework || 'torch']: {} },
-      template: {
-        spec: {
-          replicatedJobs: [{
-            name: 'trainer',
-            template: {
-              spec: {
-                template: {
-                  spec: {
-                    containers: [{ name: 'trainer', image: req.image, resources: { limits } }],
-                  },
-                },
-              },
-            },
-          }],
-        },
-      },
+      template: { spec: { replicatedJobs } },
     },
   };
 }

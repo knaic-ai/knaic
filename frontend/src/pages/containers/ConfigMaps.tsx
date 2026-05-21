@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Table, Space, Button, App, Tag } from 'antd';
-import { CodeOutlined, DeleteOutlined } from '@ant-design/icons';
+import { CodeOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import { YamlViewer } from '@/components/YamlViewer';
+import { YamlEditor } from '@/components/YamlEditor';
 import {
   buildConfigMapYaml,
+  configMapTemplate,
+  createClusterResource,
   deleteClusterResource,
   ensureConfigMapsLoaded,
   fetchClusterResourceYaml,
@@ -18,6 +21,9 @@ export function ConfigMaps() {
   const all = useConfigMaps();
   const data = useMemo(() => all.filter(c => c.namespace === namespace), [all, namespace]);
   const [yaml, setYaml] = useState<{ title: string; body: string } | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createYaml, setCreateYaml] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     ensureConfigMapsLoaded(namespace);
@@ -34,9 +40,35 @@ export function ConfigMaps() {
     }
   }
 
+  function openCreate() {
+    setCreateYaml(configMapTemplate(namespace));
+    setCreateOpen(true);
+  }
+
+  async function submitCreate() {
+    setCreating(true);
+    try {
+      await createClusterResource('configmaps', namespace, createYaml);
+      setCreateOpen(false);
+      message.success('ConfigMap created');
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : 'Failed to create ConfigMap');
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <div className="knaic-page">
-      <PageHeader title="ConfigMaps" description={`ConfigMaps in namespace ${namespace}`} />
+      <PageHeader
+        title="ConfigMaps"
+        description={`ConfigMaps in namespace ${namespace}`}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            New ConfigMap
+          </Button>
+        }
+      />
       <Table
         rowKey="id"
         size="middle"
@@ -92,6 +124,15 @@ export function ConfigMaps() {
         onClose={() => setYaml(null)}
         title={yaml?.title ?? ''}
         yaml={yaml?.body ?? ''}
+      />
+      <YamlEditor
+        open={createOpen}
+        title={`New ConfigMap in ${namespace}`}
+        value={createYaml}
+        saving={creating}
+        onChange={setCreateYaml}
+        onSave={() => void submitCreate()}
+        onClose={() => setCreateOpen(false)}
       />
     </div>
   );

@@ -1,0 +1,29 @@
+# Keep the buildkit context small. The Dockerfile copies only what each
+# stage needs (frontend/package.json + frontend/, backend/go.mod + backend/),
+# but the context tarball still gets streamed to the builder so excluding
+# generated trees here pays off.
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.turbo/
+frontend/.vite/
+
+# Backend
+backend/bin/
+backend/*.test
+backend/*.out
+
+# Generic
+*.log
+.env
+.env.local
+.git/
+.idea/
+.vscode/
+README.md
+**/README.md
+
+# Don't ship the Dockerfile or this file inside the image
+Dockerfile
+.dockerignore

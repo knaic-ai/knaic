@@ -76,6 +76,56 @@ export function defaultArgsForRuntimeFamily(runtime: string): string[] {
   return defaultServingRuntimeArgs[runtime] ?? [];
 }
 
+// openAICompatibleRuntimes lists serving-runtime families that expose the
+// OpenAI chat/completions API at `/v1` of the predictor service. Anything
+// outside this set is treated as opaque (KServe v2 predict, custom proto)
+// and excluded from the playground / agent provider list.
+//
+// vLLM / SGLang / TGI / llama.cpp / LMDeploy are the common ones. Add more
+// here when a new family is supported — the check is substring-based so
+// minor variants ("vllm-openai", "tgi-trt") match without separate entries.
+export const openAICompatibleRuntimes = ['vllm', 'sglang', 'tgi', 'llamacpp', 'llama-cpp', 'lmdeploy'] as const;
+
+function matchesOpenAIFamily(value: string | undefined): boolean {
+  if (!value) return false;
+  const lower = value.toLowerCase();
+  return openAICompatibleRuntimes.some(f => lower.includes(f));
+}
+
+// isOpenAICompatibleService decides whether an InferenceService can be
+// surfaced in the playground LLM registry.
+//
+// - LLMInferenceService is purpose-built for OpenAI-style serving — always in.
+// - Plain InferenceService is in iff its runtime points at a vLLM/SGLang/TGI
+//   ServingRuntime, or the runtime string itself looks like a known family,
+//   or the container image carries one of those names.
+//
+// `runtimes` is the namespace-scoped serving-runtime list from useRuntimes().
+// Pass [] when not loaded; the function falls back to the cheaper string
+// heuristics (svc.runtime / svc.containerImage).
+export function isOpenAICompatibleService(svc: InferenceService, runtimes: ServingRuntime[]): boolean {
+  if (svc.kind === 'LLMInferenceService') return true;
+  if (matchesOpenAIFamily(svc.runtime)) return true;
+  if (matchesOpenAIFamily(svc.containerImage)) return true;
+  const sr = runtimes.find(r => r.namespace === svc.namespace && r.name === svc.runtime);
+  if (sr && matchesOpenAIFamily(sr.runtime)) return true;
+  if (sr && matchesOpenAIFamily(sr.image)) return true;
+  return false;
+}
+
+// openAIBaseURL normalises a KServe status.url into the form the playground
+// expects: an OpenAI-compatible base ending in /v1 with no trailing slash.
+// vLLM/SGLang/TGI all serve `chat/completions` under /v1; the playground
+// proxy then appends `/chat/completions` when calling the upstream.
+export function openAIBaseURL(endpoint: string | undefined): string {
+  if (!endpoint) return '';
+  const trimmed = endpoint.replace(/\/+$/, '');
+  // Already has a versioned segment — leave it alone (covers /v1 plus the
+  // rare /v2 deployments).
+  if (/\/v\d+(\b|$)/.test(trimmed)) return trimmed;
+  return trimmed + '/v1';
+}
+
 const runtimesInitial: ServingRuntime[] = [
   {
     id: uid('sr'),

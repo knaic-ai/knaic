@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alauda/knaic-backend/internal/charts"
+	"github.com/knaic/knaic-backend/internal/charts"
 )
 
 // ErrNotFound is returned when a component name is unknown.

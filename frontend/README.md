@@ -5,8 +5,8 @@ A fully-interactive Web UI for the **knaic** console described in
 backend authentication before loading cluster data. A prototype-only mode is
 still available for design review.
 
-Visual tokens (blue primary `#2468f2`, 2px radius, compact density) are tuned
-to match the `aml-fe` / `@alauda/ui` look-and-feel.
+Visual tokens (blue primary `#2468f2`, 2px radius, compact density) give the
+console a calm, dense look on top of Ant Design 5.
 
 ## Stack
 
@@ -71,7 +71,7 @@ VITE_KNAIC_API=disabled npm run dev
 | 7 | LLM Playground | `/playground/{registry, chat, agent}` — cluster auto-discovery + external providers, OpenAI-style streaming, opencode-backed read-only agent sessions |
 | 8 | Training | `/training/{runtimes, jobs}` — TrainingRuntime and TrainJob CRUD with progress + logs |
 | 9 | Notebooks | `/notebooks` — Jupyter / VSCode spawners with start/stop |
-| 10 | Theme | aml-fe / `@alauda/ui` tokens applied via Ant Design `ConfigProvider` |
+| 10 | Theme | Custom design tokens applied via Ant Design `ConfigProvider` |
 
 ## Header controls
 

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 func TestWhoamiUsesLowerCamelJSONFields(t *testing.T) {

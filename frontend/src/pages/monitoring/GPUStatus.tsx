@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { App, Card, Col, Empty, Row, Segmented, Skeleton, Space, Spin, Statistic, Table, Tag, Tooltip } from 'antd';
+import { App, Card, Col, Empty, Row, Skeleton, Space, Spin, Statistic, Table, Tag, Tooltip } from 'antd';
 import { LoadingOutlined } from '@ant-design/icons';
 import {
   Area,
@@ -25,15 +25,6 @@ import {
   type GPUVendorSummary,
 } from '@/api/gpu';
 
-type Scope = 'cluster' | 'namespace';
-
-// Cluster scope is admin-only; non-admin users land on namespace scope
-// directly. This is enforced server-side too — we just don't offer the
-// segmented option to non-admins.
-function defaultScopeFor(isAdmin: boolean): Scope {
-  return isAdmin ? 'cluster' : 'namespace';
-}
-
 // Donut palette — green for "free / available" reads as healthy, blue for
 // "in use" matches the rest of the monitoring charts, and a tasteful set
 // of accent colours for the plugin slice. Order matters: device plugins
@@ -42,15 +33,41 @@ const DONUT_USED = '#2468f2';
 const DONUT_FREE = '#10b981';
 const PLUGIN_PALETTE = ['#2468f2', '#a855f7', '#10b981', '#f8b418', '#e94f4f', '#06b6d4', '#8b5cf6', '#f97316'];
 
+// HAMi replaces the vanilla NVIDIA device plugin and re-uses the
+// `nvidia.com/*` namespace, so we identify a HAMi-managed node by the
+// presence of any HAMi-specific auxiliary key: gpualloc (explicit slot
+// count), gpucores (% of physical core per request), or gpumem (MiB per
+// request). When any of those is on the node we treat the whole
+// nvidia.com bucket as HAMi — including a bare nvidia.com/gpu, which
+// HAMi 2.x re-advertises as a vGPU slot count.
+const HAMI_AUX_KEYS = ['nvidia.com/gpualloc', 'nvidia.com/gpucores', 'nvidia.com/gpumem'] as const;
+
+function isHAMiManaged(resources: Record<string, number>): boolean {
+  return HAMI_AUX_KEYS.some(k => k in resources);
+}
+
+// hamiSlotCount picks the best available "GPU count" for a HAMi node or
+// pod. Preference order:
+//   1. gpualloc — explicit slot count (auxiliary HAMi key).
+//   2. nvidia.com/gpu — HAMi 2.x re-uses this key as the slot count.
+//   3. gpucores / 100 — physical-card approximation (cores are reported
+//      as a percentage, so each whole physical card contributes 100).
+// Returns 0 when none of the above is set, which the donut callers treat
+// as "still HAMi-managed, just nothing to count yet".
+function hamiSlotCount(resources: Record<string, number>): number {
+  if (typeof resources['nvidia.com/gpualloc'] === 'number') return resources['nvidia.com/gpualloc'];
+  if (typeof resources['nvidia.com/gpu'] === 'number') return resources['nvidia.com/gpu'];
+  const cores = resources['nvidia.com/gpucores'];
+  if (typeof cores === 'number' && cores > 0) return Math.max(1, Math.floor(cores / 100));
+  return 0;
+}
+
 // classifyNodePlugin returns the device-plugin label that's exposing the
-// GPU resources on a given node. HAMi typically advertises BOTH
-// nvidia.com/gpu and the auxiliary nvidia.com/gpualloc; vanilla NVIDIA
-// only exposes nvidia.com/gpu. We discriminate by the presence of the
-// auxiliary key.
+// GPU resources on a given node.
 function classifyNodePlugin(capacity: Record<string, number>): { plugin: string; count: number } | null {
   const keys = Object.keys(capacity ?? {});
-  if (keys.some(k => k === 'nvidia.com/gpualloc')) {
-    return { plugin: 'HAMi (vGPU)', count: capacity['nvidia.com/gpu'] ?? capacity['nvidia.com/gpualloc'] ?? 0 };
+  if (isHAMiManaged(capacity)) {
+    return { plugin: 'HAMi (vGPU)', count: hamiSlotCount(capacity) };
   }
   if (capacity['nvidia.com/gpu']) {
     return { plugin: 'NVIDIA Device Plugin', count: capacity['nvidia.com/gpu'] };
@@ -73,8 +90,11 @@ function classifyNodePlugin(capacity: Record<string, number>): { plugin: string;
 // node-capacity classifier but useful when the caller can't read nodes.
 function classifyPodPlugin(resources: Record<string, number>): { plugin: string; count: number } | null {
   const keys = Object.keys(resources ?? {});
-  if (keys.some(k => k === 'nvidia.com/gpualloc')) {
-    return { plugin: 'HAMi (vGPU)', count: resources['nvidia.com/gpu'] ?? resources['nvidia.com/gpualloc'] ?? 0 };
+  if (isHAMiManaged(resources)) {
+    // Pods commonly request HAMi via gpucores+gpumem and omit gpualloc,
+    // so fall back to "at least one slot" when no count key is set —
+    // otherwise the pod would silently drop out of the plugin tally.
+    return { plugin: 'HAMi (vGPU)', count: hamiSlotCount(resources) || 1 };
   }
   if (resources['nvidia.com/gpu']) {
     return { plugin: 'NVIDIA Device Plugin', count: resources['nvidia.com/gpu'] };
@@ -111,34 +131,54 @@ export function GPUStatus() {
   const { user, namespace } = useApp();
   const { message } = App.useApp();
   const isAdmin = user.isPlatformAdmin;
-  const [scope, setScope] = useState<Scope>(defaultScopeFor(isAdmin));
-  const [status, setStatus] = useState<GPUStatus | null>(null);
+  // clusterStatus drives the headline charts (usage, plugin breakdown,
+  // per-vendor) for every caller — admins via the SA-backed apiserver path,
+  // non-admins via the VictoriaMetrics-backed monitoring path.
+  const [clusterStatus, setClusterStatus] = useState<GPUStatus | null>(null);
+  const [clusterLoading, setClusterLoading] = useState(true);
+  // nsStatus only fetched for non-admins, used solely for the pod table.
+  // Admins read pods from clusterStatus.pods directly.
+  const [nsStatus, setNsStatus] = useState<GPUStatus | null>(null);
+  const [nsLoading, setNsLoading] = useState(false);
   const [devices, setDevices] = useState<GPUDeviceUsage[]>([]);
-  const [statusLoading, setStatusLoading] = useState(true);
   const [devicesLoading, setDevicesLoading] = useState(true);
   // True only on the very first render before any data has arrived. While
   // it's true we show a single big "Waiting" overlay on the whole content
-  // area; subsequent reloads (scope/namespace change) get the smaller
-  // section-level spinners so users keep their context.
-  const isInitialLoad = status === null && statusLoading;
+  // area; subsequent reloads (namespace change) get the smaller section-
+  // level spinners so users keep their context.
+  const isInitialLoad = clusterStatus === null && clusterLoading;
 
-  // Reset to namespace scope when admin status flips false (rare, but
-  // possible when whoami refreshes after a profile change).
-  useEffect(() => {
-    if (!isAdmin && scope === 'cluster') setScope('namespace');
-  }, [isAdmin, scope]);
-
-  // Status: refetched whenever scope or namespace changes.
+  // Cluster-wide status: fetched once per mount (admin status doesn't
+  // change inside a session, and the cluster view doesn't depend on the
+  // selected namespace).
   useEffect(() => {
     let cancelled = false;
-    setStatusLoading(true);
-    fetchGPUStatus(scope, scope === 'namespace' ? namespace : undefined)
-      .then(s => { if (!cancelled) setStatus(s); })
+    setClusterLoading(true);
+    fetchGPUStatus('cluster')
+      .then(s => { if (!cancelled) setClusterStatus(s); })
       .catch(e => { if (!cancelled) message.error((e as Error).message); })
-      .finally(() => { if (!cancelled) setStatusLoading(false); });
+      .finally(() => { if (!cancelled) setClusterLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, namespace]);
+  }, []);
+
+  // Namespace pod table — non-admin only, refetched on namespace change.
+  // Apiserver via impersonation gates visibility; matches RBAC exactly.
+  useEffect(() => {
+    if (isAdmin) {
+      setNsStatus(null);
+      setNsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setNsLoading(true);
+    fetchGPUStatus('namespace', namespace)
+      .then(s => { if (!cancelled) setNsStatus(s); })
+      .catch(e => { if (!cancelled) message.error((e as Error).message); })
+      .finally(() => { if (!cancelled) setNsLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, namespace]);
 
   // Per-card DCGM time series — admin only. Empty array on clusters
   // without DCGM scraping.
@@ -155,12 +195,15 @@ export function GPUStatus() {
       .catch(() => { if (!cancelled) setDevices([]); })
       .finally(() => { if (!cancelled) setDevicesLoading(false); });
     return () => { cancelled = true; };
-  }, [isAdmin, scope, namespace]);
+  }, [isAdmin]);
 
-  const vendors = status?.vendors ?? [];
-  const summary = status?.summary ?? { total: 0, used: 0, available: 0 };
-  const nodes = status?.nodes ?? [];
-  const pods = status?.pods ?? [];
+  const vendors = clusterStatus?.vendors ?? [];
+  const summary = clusterStatus?.summary ?? { total: 0, used: 0, available: 0 };
+  const nodes = clusterStatus?.nodes ?? [];
+  // Pod source diverges by role: admins get the cluster-wide list (with
+  // namespace column); non-admins get the namespace-scoped list.
+  const pods = isAdmin ? (clusterStatus?.pods ?? []) : (nsStatus?.pods ?? []);
+  const podsLoading = isAdmin ? clusterLoading : nsLoading;
 
   // Donut #1: used / available, total in the centre. We force a tiny
   // sentinel slice when the cluster has no GPUs at all so the donut still
@@ -208,20 +251,8 @@ export function GPUStatus() {
         title="GPU status"
         description={
           isAdmin
-            ? 'Cluster-wide GPU inventory and pod-to-card assignment. Switch to namespace scope to drill into a workspace.'
-            : `GPU usage in namespace ${namespace}.`
-        }
-        extra={
-          isAdmin && (
-            <Segmented
-              value={scope}
-              onChange={v => setScope(v as Scope)}
-              options={[
-                { label: 'Cluster', value: 'cluster' },
-                { label: 'Namespace', value: 'namespace' },
-              ]}
-            />
-          )
+            ? 'Cluster-wide GPU inventory and pod-to-card assignment.'
+            : `Cluster-wide GPU inventory. Pod assignment shown for namespace ${namespace}.`
         }
       />
 
@@ -244,21 +275,18 @@ export function GPUStatus() {
           </Spin>
         </Card>
       ) : (
-        <Spin spinning={statusLoading} indicator={<LoadingOutlined spin />}>
+        <Spin spinning={clusterLoading} indicator={<LoadingOutlined spin />}>
           {/*
             Headline visualisation: two doughnut charts side-by-side.
-            #1 — usage breakdown (Used / Available), total in the centre.
+            #1 — cluster-wide capacity (Used / Available), total in the centre.
             #2 — physical GPUs grouped by managing device plugin (HAMi,
                  NVIDIA Device Plugin, Huawei NPU, …).
-            Stat numbers live as the chart's center label / tooltip, so
-            we don't duplicate them in a separate stat row.
+            Both reflect the whole cluster regardless of caller role; the
+            namespace-scoped drill-down lives in the pod table below.
           */}
           <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
             <Col xs={24} md={12}>
-              <Card
-                size="small"
-                title={scope === 'cluster' ? 'GPU capacity' : 'GPU usage in namespace'}
-              >
+              <Card size="small" title="GPU capacity (cluster)">
                 <UsageDonut
                   data={usageDonut}
                   total={summary.total}
@@ -274,11 +302,7 @@ export function GPUStatus() {
                   <Space>
                     <span>By device plugin</span>
                     <Tooltip
-                      title={
-                        nodes.length > 0
-                          ? 'Physical GPUs grouped by which device plugin manages them. Inferred per-node from the resource keys the kubelet advertises.'
-                          : 'Inferred from the resource keys the namespace’s pods request — node-level capacity isn’t available without cluster-wide read.'
-                      }
+                      title="Physical GPUs grouped by which device plugin manages them. Inferred per-node from the resource keys the kubelet advertises."
                     >
                       <Tag color="default" style={{ marginRight: 0 }}>{pluginsDonut.length || 0} plugin{pluginsDonut.length === 1 ? '' : 's'}</Tag>
                     </Tooltip>
@@ -292,8 +316,8 @@ export function GPUStatus() {
         </Spin>
       )}
 
-      {vendors.length === 0 && !statusLoading && !isInitialLoad && (
-        <Empty description="No GPU resources detected on the cluster (or in this namespace)." style={{ margin: '40px 0' }} />
+      {vendors.length === 0 && !clusterLoading && !isInitialLoad && (
+        <Empty description="No GPU resources detected on the cluster." style={{ margin: '40px 0' }} />
       )}
 
       {/* Per-vendor breakdown — primary count + auxiliary keys. */}
@@ -302,10 +326,11 @@ export function GPUStatus() {
       )}
 
       {/*
-        Cluster scope (admin) shows the per-node breakdown so you can see
-        which nodes are saturated and which still have headroom.
+        Per-node breakdown — admin only. Non-admins can't read individual
+        node names via impersonation, and exposing them would leak cluster
+        topology we'd rather keep gated.
       */}
-      {scope === 'cluster' && nodes.length > 0 && (
+      {isAdmin && nodes.length > 0 && (
         <Card title="Per-node breakdown" size="small" style={{ marginBottom: 12 }}>
           <Table
             rowKey="node"
@@ -324,11 +349,13 @@ export function GPUStatus() {
 
       {/* Pod-to-GPU assignment table — admin sees cluster-wide, ns user only their namespace's pods. */}
       <Card
-        title={scope === 'cluster' ? 'Pods using GPU (cluster-wide)' : `Pods using GPU in namespace ${namespace}`}
+        title={isAdmin ? 'Pods using GPU (cluster-wide)' : `Pods using GPU in namespace ${namespace}`}
         size="small"
         style={{ marginBottom: 12 }}
       >
-        <PodTable pods={pods} showNamespace={scope === 'cluster'} />
+        <Spin spinning={podsLoading && pods.length === 0} indicator={<LoadingOutlined spin />}>
+          <PodTable pods={pods} showNamespace={isAdmin} />
+        </Spin>
       </Card>
 
       {/*
@@ -336,7 +363,7 @@ export function GPUStatus() {
         per render so a 200-GPU cluster doesn't melt the browser; the user
         can scroll to see more (or we can paginate later).
       */}
-      {isAdmin && scope === 'cluster' && (
+      {isAdmin && (
         <DeviceChartGrid devices={devices} loading={devicesLoading} />
       )}
     </div>

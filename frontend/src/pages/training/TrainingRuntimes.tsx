@@ -1,17 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Table, Tag, Space, Button, App, Modal, Form, Input, InputNumber, Select, Switch } from 'antd';
+import { Table, Tag, Space, Button, App } from 'antd';
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { PageHeader } from '@/components/PageHeader';
 import {
-  createTrainingRuntime,
   deleteTrainingRuntime,
   ensureTrainingRuntimesLoaded,
   useTrainingRuntimes,
   type TrainingFramework,
 } from '@/data/training';
 import { useApp } from '@/context/AppContext';
-
-const FRAMEWORKS: TrainingFramework[] = ['torch', 'deepspeed', 'mpi', 'tensorflow', 'jax'];
+import { NewTrainingRuntimeModal } from './NewTrainingRuntimeModal';
 
 const fwColor: Record<TrainingFramework, string> = {
   torch: 'red',
@@ -30,7 +28,6 @@ export function TrainingRuntimesPage() {
     [all, namespace],
   );
   const [open, setOpen] = useState(false);
-  const [form] = Form.useForm();
 
   useEffect(() => {
     ensureTrainingRuntimesLoaded(namespace);
@@ -109,66 +106,7 @@ export function TrainingRuntimesPage() {
           },
         ]}
       />
-      <Modal
-        open={open}
-        title="New training runtime"
-        onCancel={() => setOpen(false)}
-        destroyOnClose
-        onOk={async () => {
-          const v = await form.validateFields();
-          try {
-            await createTrainingRuntime(namespace, {
-              name: v.name,
-              framework: v.framework,
-              image: v.image,
-              numNodes: v.numNodes,
-              cpuLimit: v.cpu,
-              memoryLimit: v.memory,
-              gpuLimit: v.gpu,
-              cluster: v.cluster,
-            });
-            setOpen(false);
-            form.resetFields();
-            message.success('TrainingRuntime created');
-          } catch (err) {
-            message.error(err instanceof Error ? err.message : 'Failed to create TrainingRuntime');
-          }
-        }}
-      >
-        <Form form={form} layout="vertical" preserve={false}>
-          <Form.Item name="name" label="Name" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="framework" label="Framework" initialValue="torch">
-            <Select options={FRAMEWORKS.map(v => ({ label: v, value: v }))} />
-          </Form.Item>
-          <Form.Item name="image" label="Image" rules={[{ required: true }]}>
-            <Input placeholder="ghcr.io/kubeflow/trainer/torch-runtime:2.4.0" />
-          </Form.Item>
-          <Form.Item name="numNodes" label="Number of nodes" initialValue={1}>
-            <InputNumber min={1} style={{ width: '100%' }} />
-          </Form.Item>
-          <Space>
-            <Form.Item name="cpu" label="CPU / node" initialValue="16">
-              <Input style={{ width: 120 }} />
-            </Form.Item>
-            <Form.Item name="memory" label="Memory / node" initialValue="128Gi">
-              <Input style={{ width: 140 }} />
-            </Form.Item>
-            <Form.Item name="gpu" label="GPU / node" initialValue={2}>
-              <InputNumber min={0} style={{ width: 100 }} />
-            </Form.Item>
-          </Space>
-          {user.isPlatformAdmin && (
-            <Form.Item
-              name="cluster"
-              label="ClusterTrainingRuntime"
-              valuePropName="checked"
-              tooltip="Cluster-scoped, shared across all namespaces. Stored in knaic-system."
-            >
-              <Switch />
-            </Form.Item>
-          )}
-        </Form>
-      </Modal>
+      <NewTrainingRuntimeModal open={open} namespace={namespace} onClose={() => setOpen(false)} />
     </div>
   );
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/alauda/knaic-backend/internal/admin"
+	"github.com/knaic/knaic-backend/internal/admin"
 )
 
 type adminAPI struct {

@@ -43,6 +43,12 @@ func (s *Service) WithDynamic(dyn dynamic.Interface) *Service {
 // CreateRuntime applies a TrainingRuntime CR. The chart-style template
 // below uses the Trainer v2 mlPolicy + JobSet template shape so the
 // projector can read the framework and resources back out.
+//
+// Pre-jobs (dataset/model download, etc.) become sibling replicatedJobs
+// with a dependsOn chain — same shape as the upstream
+// `kf-trainingruntime-npu.yaml` reference: each pre-job depends on the
+// previous one, and the trainer replicatedJob ("node") depends on the
+// last pre-job.
 func (s *Service) CreateRuntime(ctx context.Context, namespace string, req CreateRuntimeRequest) (*unstructured.Unstructured, error) {
 	if req.Name == "" || req.Image == "" {
 		return nil, errors.New("name and image are required")
@@ -53,25 +59,97 @@ func (s *Service) CreateRuntime(ctx context.Context, namespace string, req Creat
 	if req.Framework == "" {
 		req.Framework = "torch"
 	}
-
-	limits := map[string]any{}
-	if req.CPULimit != "" {
-		limits["cpu"] = req.CPULimit
+	if req.CPULimit == "" {
+		req.CPULimit = req.CPURequest
 	}
-	if req.MemoryLimit != "" {
-		limits["memory"] = req.MemoryLimit
-	}
-	if req.GPULimit > 0 {
-		limits["nvidia.com/gpu"] = req.GPULimit
+	if req.MemoryLimit == "" {
+		req.MemoryLimit = req.MemoryRequest
 	}
 
-	container := map[string]any{
-		"name":  "trainer",
-		"image": req.Image,
+	requests, limits := resourceMaps(req.CPURequest, req.MemoryRequest, req.CPULimit, req.MemoryLimit, req.GPUValues)
+	trainerContainer := map[string]any{"name": "node", "image": req.Image}
+	if len(req.Command) > 0 {
+		trainerContainer["command"] = stringsToAny(req.Command)
 	}
-	if len(limits) > 0 {
-		container["resources"] = map[string]any{"limits": limits}
+	if len(req.Args) > 0 {
+		trainerContainer["args"] = stringsToAny(req.Args)
 	}
+	if len(req.Env) > 0 {
+		trainerContainer["env"] = envToAny(req.Env)
+	}
+	if len(requests) > 0 || len(limits) > 0 {
+		trainerContainer["resources"] = map[string]any{"requests": requests, "limits": limits}
+	}
+
+	replicatedJobs := make([]any, 0, len(req.PreJobs)+1)
+	var lastStep string
+	for _, p := range req.PreJobs {
+		if !isPreJobName(p.Name) {
+			return nil, fmt.Errorf("pre-job name must be one of dataset-initializer or model-initializer; got %q", p.Name)
+		}
+		if p.Image == "" {
+			return nil, fmt.Errorf("pre-job %s: image is required", p.Name)
+		}
+		preContainer := map[string]any{"name": p.Name, "image": p.Image}
+		if len(p.Command) > 0 {
+			preContainer["command"] = stringsToAny(p.Command)
+		}
+		if len(p.Args) > 0 {
+			preContainer["args"] = stringsToAny(p.Args)
+		}
+		if len(p.Env) > 0 {
+			preContainer["env"] = envToAny(p.Env)
+		}
+		job := map[string]any{
+			"name": p.Name,
+			// The Trainer v2 controller looks at the
+			// trainer.kubeflow.org/trainjob-ancestor-step label on the
+			// replicatedJob template to identify the initializer kind, so
+			// we stamp it with the step name (dataset-initializer or
+			// model-initializer).
+			"template": map[string]any{
+				"metadata": map[string]any{
+					"labels": map[string]any{
+						"trainer.kubeflow.org/trainjob-ancestor-step": p.Name,
+					},
+				},
+				"spec": map[string]any{
+					"template": map[string]any{
+						"spec": map[string]any{
+							"containers": []any{preContainer},
+						},
+					},
+				},
+			},
+		}
+		if lastStep != "" {
+			job["dependsOn"] = []any{map[string]any{"name": lastStep, "status": "Complete"}}
+		}
+		replicatedJobs = append(replicatedJobs, job)
+		lastStep = p.Name
+	}
+
+	trainerJob := map[string]any{
+		"name": "node",
+		"template": map[string]any{
+			"metadata": map[string]any{
+				"labels": map[string]any{
+					"trainer.kubeflow.org/trainjob-ancestor-step": "trainer",
+				},
+			},
+			"spec": map[string]any{
+				"template": map[string]any{
+					"spec": map[string]any{
+						"containers": []any{trainerContainer},
+					},
+				},
+			},
+		},
+	}
+	if lastStep != "" {
+		trainerJob["dependsOn"] = []any{map[string]any{"name": lastStep, "status": "Complete"}}
+	}
+	replicatedJobs = append(replicatedJobs, trainerJob)
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -93,26 +171,66 @@ func (s *Service) CreateRuntime(ctx context.Context, namespace string, req Creat
 				},
 				"template": map[string]any{
 					"spec": map[string]any{
-						"replicatedJobs": []any{
-							map[string]any{
-								"name": "trainer",
-								"template": map[string]any{
-									"spec": map[string]any{
-										"template": map[string]any{
-											"spec": map[string]any{
-												"containers": []any{container},
-											},
-										},
-									},
-								},
-							},
-						},
+						"replicatedJobs": replicatedJobs,
 					},
 				},
 			},
 		},
 	}
 	return s.dyn.Resource(gvrRuntime).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+}
+
+// resourceMaps builds the requests/limits maps used by both the trainer
+// and pre-job containers. GPU values appear in both halves (Kubernetes
+// requires extended resources to be set on limits).
+func resourceMaps(cpuReq, memReq, cpuLim, memLim string, gpu map[string]int64) (map[string]any, map[string]any) {
+	requests := map[string]any{}
+	limits := map[string]any{}
+	if cpuReq != "" {
+		requests["cpu"] = cpuReq
+	}
+	if memReq != "" {
+		requests["memory"] = memReq
+	}
+	if cpuLim != "" {
+		limits["cpu"] = cpuLim
+	}
+	if memLim != "" {
+		limits["memory"] = memLim
+	}
+	for k, v := range gpu {
+		requests[k] = v
+		limits[k] = v
+	}
+	return requests, limits
+}
+
+// isPreJobName accepts only the two Trainer v2 pre-job kinds. Anything
+// else would be a name the upstream controller doesn't wire storage /
+// labels for, so we reject it explicitly instead of letting it through
+// and producing a runtime the controller silently ignores.
+func isPreJobName(s string) bool {
+	switch s {
+	case "dataset-initializer", "model-initializer":
+		return true
+	}
+	return false
+}
+
+func stringsToAny(in []string) []any {
+	out := make([]any, len(in))
+	for i, s := range in {
+		out[i] = s
+	}
+	return out
+}
+
+func envToAny(in []EnvVar) []any {
+	out := make([]any, 0, len(in))
+	for _, e := range in {
+		out = append(out, map[string]any{"name": e.Name, "value": e.Value})
+	}
+	return out
 }
 
 func (s *Service) CreateJob(ctx context.Context, namespace string, req CreateJobRequest) (*unstructured.Unstructured, error) {

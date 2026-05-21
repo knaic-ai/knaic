@@ -22,6 +22,19 @@ const (
 	SchemeModelScope Scheme = "modelscope"
 	SchemeS3         Scheme = "s3"
 	SchemeOCI        Scheme = "oci"
+	SchemeGitLab     Scheme = "gitlab"
+	SchemePVC        Scheme = "pvc"
+	SchemeGit        Scheme = "git"
+)
+
+// DerivedKind tags how a model relates to its parent.
+// Empty means the model has no parent (it is a base model).
+type DerivedKind string
+
+const (
+	DerivedFinetune     DerivedKind = "finetune"
+	DerivedQuantization DerivedKind = "quantization"
+	DerivedAdapter      DerivedKind = "adapter"
 )
 
 type Model struct {
@@ -39,9 +52,28 @@ type Model struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Readme    string    `json:"readme"`
+
+	// CollectionID, when non-empty, groups this model into a series
+	// (e.g. all Qwen3.5 variants). The Collection lives in the same scope
+	// as the model and is managed via /api/v1/collections.
+	CollectionID string `json:"collectionId,omitempty"`
+
+	// ParentModelID references the base model this one was derived from.
+	// DerivedKind describes the relationship (finetune | quantization |
+	// adapter). Both fields are optional; when set, the parent is shown
+	// in the detail "Model tree" view and this model is listed as a
+	// child under the parent.
+	ParentModelID string      `json:"parentModelId,omitempty"`
+	DerivedKind   DerivedKind `json:"derivedKind,omitempty"`
+
+	// SourceURL is an optional human-facing URL pointing at the origin
+	// page on huggingface.co / modelscope.cn etc. Populated automatically
+	// from the URI for hf/hf-mirror/modelscope schemes; users can override
+	// when registering models from other origins.
+	SourceURL string `json:"sourceUrl,omitempty"`
 }
 
-// CreateRequest registers a model from a raw storage URI (hf/hf-mirror/ms/s3/oci).
+// CreateRequest registers a model from a raw storage URI (hf/hf-mirror/ms/s3/oci/gitlab).
 type CreateRequest struct {
 	Name      string   `json:"name"`
 	Owner     string   `json:"owner,omitempty"` // server fills from caller if empty
@@ -52,6 +84,11 @@ type CreateRequest struct {
 	ModelType string   `json:"modelType,omitempty"`
 	SizeGB    float64  `json:"sizeGB,omitempty"`
 	Readme    string   `json:"readme,omitempty"`
+
+	CollectionID  string      `json:"collectionId,omitempty"`
+	ParentModelID string      `json:"parentModelId,omitempty"`
+	DerivedKind   DerivedKind `json:"derivedKind,omitempty"`
+	SourceURL     string      `json:"sourceUrl,omitempty"`
 }
 
 // ImportRequest registers a model from a HuggingFace or ModelScope URL.
@@ -77,9 +114,14 @@ type UploadRequest struct {
 }
 
 // PatchRequest covers the small mutations users make from the UI: bumping
-// the download counter and editing the readme/tags.
+// the download counter and editing the readme/tags + collection/tree links.
 type PatchRequest struct {
 	Readme       *string  `json:"readme,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
 	IncDownloads *int     `json:"incDownloads,omitempty"`
+
+	CollectionID  *string      `json:"collectionId,omitempty"`
+	ParentModelID *string      `json:"parentModelId,omitempty"`
+	DerivedKind   *DerivedKind `json:"derivedKind,omitempty"`
+	SourceURL     *string      `json:"sourceUrl,omitempty"`
 }

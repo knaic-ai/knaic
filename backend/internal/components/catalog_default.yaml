@@ -52,6 +52,9 @@ components:
     versions: [v1.9.0, v1.10.0]
     selectedVersion: v1.10.0
     chart: oci://ghcr.io/kubeflow/notebooks/charts/notebook-controller
+    # Match Helm releases of `kfbase` bundles that ship the notebook
+    # controller alongside other Kubeflow base components.
+    aliases: [kfbase]
     images:
       - ghcr.io/kubeflow/kubeflow/notebook-controller:v1.10.0
 
@@ -62,6 +65,10 @@ components:
     versions: [v2.0.0-rc.0, v2.0.0]
     selectedVersion: v2.0.0
     chart: oci://ghcr.io/kubeflow/trainer/charts/trainer
+    # Some distributions ship this operator under the upstream
+    # `kubeflow-trainer` Helm release name; declare an alias so the
+    # detector matches that variant too.
+    aliases: [kubeflow-trainer]
     images:
       - kubeflow/trainer-controller-manager:v2.0.0
 
@@ -82,6 +89,9 @@ components:
     versions: [v0.2.0, v0.3.0]
     selectedVersion: v0.3.0
     chart: oci://docker.io/envoyproxy/ai-gateway-helm
+    # Match Helm releases that ship the AI gateway under the
+    # shorter `ai-gateway` name.
+    aliases: [ai-gateway]
     images:
       - envoyproxy/ai-gateway:v0.3.0
 
@@ -125,3 +135,15 @@ components:
     chart: oci://registry-1.docker.io/bitnamicharts/mlflow
     images:
       - ghcr.io/mlflow/mlflow:v2.18.0
+
+  - name: victoriametrics
+    displayName: VictoriaMetrics
+    description: High-performance Prometheus-compatible metrics database. Powers the cluster monitoring and GPU status dashboards.
+    category: Observability
+    versions: [v1.110.0, v1.115.0]
+    selectedVersion: v1.115.0
+    chart: https://victoriametrics.github.io/helm-charts@victoria-metrics-cluster
+    images:
+      - victoriametrics/vmselect:v1.115.0
+      - victoriametrics/vminsert:v1.115.0
+      - victoriametrics/vmstorage:v1.115.0

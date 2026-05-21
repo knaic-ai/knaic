@@ -14,25 +14,43 @@ import (
 //go:embed seed_default.yaml
 var defaultSeedYAML []byte
 
+// SeedCollection is the YAML shape for a collection in the seed file.
+// Kept in this package (rather than referencing collections.Collection
+// directly) so the import graph stays one-way: seed → models → collections.
+type SeedCollection struct {
+	ID          string `json:"id"          yaml:"id"`
+	Name        string `json:"name"        yaml:"name"`
+	Description string `json:"description" yaml:"description"`
+	IconColor   string `json:"iconColor"   yaml:"iconColor"`
+}
+
 type seedFile struct {
-	Models []Model `json:"models"`
+	Collections []SeedCollection `json:"collections" yaml:"collections"`
+	Models      []Model          `json:"models"      yaml:"models"`
+}
+
+// SeedBundle is what LoadPublicSeed now returns: models alongside the
+// collections they reference. Both are loaded together so the IDs match.
+type SeedBundle struct {
+	Collections []SeedCollection
+	Models      []Model
 }
 
 // LoadPublicSeed reads the public-scope seed list from a YAML file. If path
 // is empty, the default list embedded into the binary is used. Defaults
-// applied: scope=public, scheme=hf when omitted.
-func LoadPublicSeed(path string) ([]Model, error) {
+// applied: scope=public, scheme=hf when omitted, SourceURL derived from URI.
+func LoadPublicSeed(path string) (SeedBundle, error) {
 	data := defaultSeedYAML
 	if path != "" {
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read public-models seed %s: %w", path, err)
+			return SeedBundle{}, fmt.Errorf("read public-models seed %s: %w", path, err)
 		}
 		data = b
 	}
 	var f seedFile
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parse public-models seed: %w", err)
+		return SeedBundle{}, fmt.Errorf("parse public-models seed: %w", err)
 	}
 	out := make([]Model, 0, len(f.Models))
 	for _, m := range f.Models {
@@ -41,25 +59,41 @@ func LoadPublicSeed(path string) ([]Model, error) {
 		if m.Scheme == "" {
 			m.Scheme = SchemeHF
 		}
+		if m.SourceURL == "" {
+			m.SourceURL = PublicSourceURL(m.URI)
+		}
 		out = append(out, m)
 	}
-	return out, nil
+	return SeedBundle{Collections: f.Collections, Models: out}, nil
 }
 
 // Seed populates the public scope from the YAML seed list if the store is
 // currently empty. Subsequent admin edits via the API are authoritative —
-// Seed never overwrites them.
-func Seed(ctx context.Context, s Store, path string) error {
+// Seed never overwrites them. Collections referenced from the bundle are
+// applied via the supplied CollectionSeeder hook so this package stays
+// independent of internal/collections.
+type CollectionSeeder func(ctx context.Context, c SeedCollection) error
+
+func Seed(ctx context.Context, s Store, path string, seedCollection CollectionSeeder) error {
 	n, err := s.Count(ctx, ScopePublic)
 	if err != nil || n > 0 {
 		return err
 	}
-	models, err := LoadPublicSeed(path)
+	bundle, err := LoadPublicSeed(path)
 	if err != nil {
 		return err
 	}
-	for _, m := range models {
-		m.ID = newID("m")
+	if seedCollection != nil {
+		for _, c := range bundle.Collections {
+			if err := seedCollection(ctx, c); err != nil {
+				return err
+			}
+		}
+	}
+	for _, m := range bundle.Models {
+		if m.ID == "" {
+			m.ID = newID("m")
+		}
 		if _, err := s.Create(ctx, m); err != nil && err != ErrConflict {
 			return err
 		}

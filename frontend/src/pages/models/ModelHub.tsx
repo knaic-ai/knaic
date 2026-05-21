@@ -1,36 +1,41 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Row,
-  Col,
-  Card,
-  Tag,
-  Input,
-  Space,
-  Button,
-  Modal,
-  Form,
-  Select,
   App,
-  Drawer,
-  Tabs,
-  Upload,
+  Button,
+  Card,
+  Col,
   Empty,
+  Form,
+  Input,
   InputNumber,
+  Modal,
+  Row,
   Segmented,
+  Select,
+  Space,
+  Tabs,
+  Tag,
+  Tooltip,
+  Typography,
+  Upload,
+  theme,
 } from 'antd';
 import {
-  PlusOutlined,
-  DownloadOutlined,
-  DeleteOutlined,
-  UploadOutlined,
+  AppstoreOutlined,
   CloudDownloadOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  ExportOutlined,
+  FolderOpenOutlined,
   GlobalOutlined,
   LockOutlined,
+  PlusOutlined,
+  ReloadOutlined,
   RocketOutlined,
+  ShareAltOutlined,
+  UploadOutlined,
 } from '@ant-design/icons';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { PageHeader } from '@/components/PageHeader';
 import {
   useModels,
@@ -40,21 +45,41 @@ import {
   importModelFromURL,
   uploadModelMeta,
   deleteModel,
-  updateModel,
   parseUri,
+  publicSourceURL,
+  isPublicSource,
   type ModelItem,
   type ModelScope,
 } from '@/data/models';
 import { useApp } from '@/context/AppContext';
-import { useStorageTargets, targetUri } from '@/data/storageTargets';
-import { useRuntimes, ensureRuntimesLoaded } from '@/data/inference';
+import { ensureStorageTargetsLoaded, useStorageTargets, targetUri } from '@/data/storageTargets';
+import {
+  ensureCollectionsLoaded,
+  reloadCollections,
+  upsertCollectionLocal,
+  removeCollectionLocal,
+  useCollections,
+} from '@/data/collections';
+import {
+  createCollection,
+  patchCollection,
+  deleteCollection,
+  type CollectionDTO,
+} from '@/api/collections';
 import { NewInferenceServiceModal } from '@/pages/inference/NewInferenceServiceModal';
+import { useRuntimes, ensureRuntimesLoaded } from '@/data/inference';
+import { ModelTypeBadge } from './ModelTypeBadge';
+import { MODEL_TYPE_META, MODEL_TYPE_OPTIONS } from './modelTypeMeta';
+import { PublishRequestModal } from './PublishRequestModal';
 
 const schemeTag: Record<string, { color: string; label: string }> = {
   hf: { color: 'orange', label: 'HuggingFace' },
   modelscope: { color: 'purple', label: 'ModelScope' },
   s3: { color: 'cyan', label: 'S3' },
   oci: { color: 'geekblue', label: 'OCI' },
+  gitlab: { color: 'magenta', label: 'GitLab' },
+  pvc: { color: 'gold', label: 'PVC' },
+  git: { color: 'magenta', label: 'Git' },
 };
 
 type ModelSort = 'created-desc' | 'created-asc' | 'name-asc';
@@ -75,7 +100,11 @@ function modelTime(value: string): number {
 function sortModels(items: ModelItem[], sortBy: ModelSort): ModelItem[] {
   return [...items].sort((a, b) => {
     if (sortBy === 'name-asc') {
-      return nameCollator.compare(a.name, b.name) || modelTime(b.createdAt) - modelTime(a.createdAt) || a.id.localeCompare(b.id);
+      return (
+        nameCollator.compare(a.name, b.name) ||
+        modelTime(b.createdAt) - modelTime(a.createdAt) ||
+        a.id.localeCompare(b.id)
+      );
     }
     const delta = modelTime(a.createdAt) - modelTime(b.createdAt);
     const byTime = sortBy === 'created-asc' ? delta : -delta;
@@ -89,16 +118,23 @@ export function ModelHub() {
   const { namespace, user } = useApp();
   const { message, modal } = App.useApp();
   const nav = useNavigate();
+  const [sp, setSp] = useSearchParams();
   const models = useModels();
+  const collections = useCollections();
   const targets = useStorageTargets();
   const runtimes = useRuntimes();
+  const { token } = theme.useToken();
 
-  // Load on scope/namespace change.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     ensureModelsLoaded(actualScope, actualScope === 'private' ? namespace : undefined);
+    ensureCollectionsLoaded(actualScope, actualScope === 'private' ? namespace : undefined);
     ensureRuntimesLoaded(namespace);
+    ensureStorageTargetsLoaded();
   }, [actualScope, namespace]);
+
+  const activeTab = sp.get('tab') === 'collections' ? 'collections' : 'models';
+  const collectionFilter = sp.get('collection') ?? '';
 
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState<string | null>(null);
@@ -107,41 +143,53 @@ export function ModelHub() {
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [detail, setDetail] = useState<ModelItem | null>(null);
   const [publishModel, setPublishModel] = useState<ModelItem | null>(null);
+  const [publishToCatalog, setPublishToCatalog] = useState<ModelItem | null>(null);
+  const [collectionEditor, setCollectionEditor] = useState<CollectionDTO | { creating: true } | null>(null);
   const [form] = Form.useForm();
   const [importForm] = Form.useForm();
   const [uploadForm] = Form.useForm();
+  const [collectionForm] = Form.useForm();
 
-  const scoped = useMemo(
+  const scopedModels = useMemo(
     () =>
       models.filter(m =>
-        actualScope === 'public' ? m.scope === 'public' : m.scope === 'private' && m.namespace === namespace,
+        actualScope === 'public'
+          ? m.scope === 'public'
+          : m.scope === 'private' && m.namespace === namespace,
       ),
     [models, actualScope, namespace],
   );
 
-  const visibleModels = useMemo(
-    () => {
-      const items = scoped.filter(m => {
-        if (search && !m.name.toLowerCase().includes(search.toLowerCase())) return false;
-        if (tagFilter && !m.tags.includes(tagFilter)) return false;
-        if (typeFilter !== 'all' && m.modelType !== typeFilter) return false;
-        return true;
-      });
-      return sortModels(items, sortBy);
-    },
-    [scoped, search, tagFilter, typeFilter, sortBy],
+  const scopedCollections = useMemo(
+    () =>
+      collections.filter(c =>
+        actualScope === 'public'
+          ? c.scope === 'public'
+          : c.scope === 'private' && c.namespace === namespace,
+      ),
+    [collections, actualScope, namespace],
   );
 
+  const visibleModels = useMemo(() => {
+    const items = scopedModels.filter(m => {
+      if (search && !m.name.toLowerCase().includes(search.toLowerCase())) return false;
+      if (tagFilter && !m.tags.includes(tagFilter)) return false;
+      if (typeFilter !== 'all' && m.modelType !== typeFilter) return false;
+      if (collectionFilter && m.collectionId !== collectionFilter) return false;
+      return true;
+    });
+    return sortModels(items, sortBy);
+  }, [scopedModels, search, tagFilter, typeFilter, sortBy, collectionFilter]);
+
   const allTags = useMemo(
-    () => Array.from(new Set(scoped.flatMap(m => m.tags))).sort(),
-    [scoped],
+    () => Array.from(new Set(scopedModels.flatMap(m => m.tags))).sort(),
+    [scopedModels],
   );
 
   const allModelTypes = useMemo(
-    () => Array.from(new Set(scoped.map(m => m.modelType).filter(Boolean))).sort(nameCollator.compare),
-    [scoped],
+    () => Array.from(new Set(scopedModels.map(m => m.modelType).filter(Boolean))).sort(nameCollator.compare),
+    [scopedModels],
   );
 
   useEffect(() => {
@@ -152,10 +200,7 @@ export function ModelHub() {
 
   const canWritePublic = user.isPlatformAdmin;
   const canWrite = actualScope === 'public' ? canWritePublic : true;
-
-  const openPublish = (m: ModelItem) => {
-    setPublishModel(m);
-  };
+  const isCatalog = actualScope === 'public';
 
   const publishDefaults = useMemo(() => {
     if (!publishModel) return undefined;
@@ -163,53 +208,156 @@ export function ModelHub() {
     return {
       name: publishModel.name.split('/').pop()?.toLowerCase().replace(/[^a-z0-9-]/g, '-') ?? '',
       kind: (publishModel.modelType === 'llm' ? 'LLMInferenceService' : 'InferenceService') as
-        'LLMInferenceService' | 'InferenceService',
+        | 'LLMInferenceService'
+        | 'InferenceService',
       runtime: defaultRuntime?.name,
       modelUri: publishModel.uri,
     };
   }, [publishModel, runtimes, namespace]);
 
-  return (
-    <div className="knaic-page">
-      <PageHeader
-        title={
-          actualScope === 'public' ? (
-            <>
-              <GlobalOutlined /> Model Hub · Public
-            </>
-          ) : (
-            <>
-              <LockOutlined /> Model Hub · Private ({namespace})
-            </>
-          )
-        }
-        description={
-          actualScope === 'public'
-            ? 'Models visible to all users. Only platform admins can add or remove entries.'
-            : `Private models scoped to namespace ${namespace}.`
-        }
-        extra={
-          <Space>
-            <Button onClick={() => reloadModels(actualScope, actualScope === 'private' ? namespace : undefined)}>
-              Refresh
-            </Button>
-            {canWrite && (
-              <>
-                <Button icon={<CloudDownloadOutlined />} onClick={() => setImportOpen(true)}>
-                  Import from URL
-                </Button>
-                <Button icon={<UploadOutlined />} onClick={() => { uploadForm.resetFields(); setUploadOpen(true); }}>
-                  Upload from local disk
-                </Button>
-                <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-                  Register model
-                </Button>
-              </>
-            )}
-          </Space>
-        }
-      />
+  const collectionsById = useMemo(() => {
+    const m = new Map<string, CollectionDTO>();
+    scopedCollections.forEach(c => m.set(c.id, c));
+    return m;
+  }, [scopedCollections]);
 
+  // Reset the collection filter when its target collection disappears.
+  useEffect(() => {
+    if (collectionFilter && !collectionsById.has(collectionFilter)) {
+      const next = new URLSearchParams(sp);
+      next.delete('collection');
+      setSp(next, { replace: true });
+    }
+  }, [collectionFilter, collectionsById, sp, setSp]);
+
+  const clearCollectionFilter = () => {
+    const next = new URLSearchParams(sp);
+    next.delete('collection');
+    setSp(next);
+  };
+
+  const renderModelCard = (m: ModelItem) => {
+    const sch = schemeTag[m.scheme] ?? { color: 'default', label: m.scheme };
+    const sourceURL = publicSourceURL(m.uri, m.sourceUrl);
+    const collection = m.collectionId ? collectionsById.get(m.collectionId) : undefined;
+    return (
+      <Col xs={24} md={12} xl={8} key={m.id}>
+        <Card
+          className="model-card"
+          size="small"
+          hoverable
+          onClick={() => nav(`/models/${actualScope}/${m.id}`)}
+          title={
+            <Space direction="vertical" size={0} style={{ width: '100%' }}>
+              <Space size={6} wrap>
+                <span style={{ fontWeight: 600 }}>{m.name}</span>
+                <ModelTypeBadge type={m.modelType} size="small" />
+                <Tag color={sch.color}>{sch.label}</Tag>
+                {sourceURL && (
+                  <Tooltip title="Open original source">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<ExportOutlined />}
+                      onClick={e => {
+                        e.stopPropagation();
+                        window.open(sourceURL, '_blank', 'noopener,noreferrer');
+                      }}
+                    />
+                  </Tooltip>
+                )}
+              </Space>
+              <span className="knaic-sub mono" style={{ fontSize: 11 }}>{m.uri}</span>
+            </Space>
+          }
+          styles={{ body: { minHeight: 140 } }}
+          actions={[
+            <Button
+              key="publish"
+              type="link"
+              icon={<RocketOutlined />}
+              onClick={e => {
+                e.stopPropagation();
+                setPublishModel(m);
+              }}
+            >
+              Publish
+            </Button>,
+            ...(actualScope === 'private' && isPublicSource(m.uri)
+              ? [
+                  <Button
+                    key="publish-catalog"
+                    type="link"
+                    icon={<ShareAltOutlined />}
+                    onClick={e => {
+                      e.stopPropagation();
+                      setPublishToCatalog(m);
+                    }}
+                  >
+                    To catalog
+                  </Button>,
+                ]
+              : []),
+            ...(canWrite
+              ? [
+                  <Button
+                    key="delete"
+                    type="link"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={e => {
+                      e.stopPropagation();
+                      modal.confirm({
+                        title: `Delete ${m.name}?`,
+                        onOk: async () => {
+                          try {
+                            await deleteModel(m.id);
+                            message.success('Model deleted');
+                          } catch (err) {
+                            message.error((err as Error).message);
+                          }
+                        },
+                      });
+                    }}
+                  >
+                    Delete
+                  </Button>,
+                ]
+              : []),
+          ]}
+        >
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            {collection && (
+              <Tag
+                icon={<AppstoreOutlined />}
+                style={{
+                  background: collection.iconColor ? `${collection.iconColor}1A` : undefined,
+                  borderColor: collection.iconColor ? `${collection.iconColor}55` : undefined,
+                  color: collection.iconColor ?? undefined,
+                  fontWeight: 600,
+                }}
+              >
+                {collection.name}
+              </Tag>
+            )}
+            <Space wrap size={4}>
+              {m.tags.map(t => (
+                <Tag key={t}>{t}</Tag>
+              ))}
+            </Space>
+            <Space size={16} className="knaic-sub" wrap>
+              <span>Size: {m.sizeGB.toFixed(1)} GiB</span>
+              <span>Downloads: {m.downloads}</span>
+              <span>Created: {m.createdAt}</span>
+            </Space>
+          </Space>
+        </Card>
+      </Col>
+    );
+  };
+
+  const renderModelsList = () => (
+    <>
       <div className="model-filter-panel">
         <div className="model-filter-row">
           <Space wrap align="center" size={[12, 8]}>
@@ -226,16 +374,15 @@ export function ModelHub() {
               onChange={setTagFilter}
               style={{ width: 200 }}
             />
+            {collectionFilter && (
+              <Tag closable onClose={clearCollectionFilter} color="purple" icon={<AppstoreOutlined />}>
+                Collection: {collectionsById.get(collectionFilter)?.name ?? collectionFilter}
+              </Tag>
+            )}
           </Space>
           <Space align="center" size={8} className="model-sort-control">
             <span className="knaic-sub">Sort by</span>
-            <Select
-              value={sortBy}
-              options={sortOptions}
-              onChange={setSortBy}
-              style={{ width: 230 }}
-              aria-label="Sort by"
-            />
+            <Select value={sortBy} options={sortOptions} onChange={setSortBy} style={{ width: 230 }} />
           </Space>
         </div>
         <div className="model-type-filter">
@@ -245,65 +392,81 @@ export function ModelHub() {
             value={typeFilter}
             options={[
               { label: 'All', value: 'all' },
-              ...allModelTypes.map(t => ({ label: t, value: t })),
+              ...allModelTypes.map(t => {
+                const meta = MODEL_TYPE_META[t];
+                if (!meta) return { label: t, value: t };
+                const Icon = meta.Icon;
+                return {
+                  label: (
+                    <Space size={4}>
+                      <Icon style={{ color: meta.color, fontSize: 12 }} />
+                      <span>{meta.label}</span>
+                    </Space>
+                  ),
+                  value: t,
+                };
+              }),
             ]}
             onChange={value => setTypeFilter(String(value))}
           />
         </div>
       </div>
-
       {visibleModels.length === 0 ? (
         <Empty description="No models match these filters." />
       ) : (
+        <Row gutter={[12, 12]}>{visibleModels.map(renderModelCard)}</Row>
+      )}
+    </>
+  );
+
+  const renderCollectionsTab = () => (
+    <>
+      {canWrite && (
+        <div style={{ marginBottom: 12 }}>
+          <Button icon={<PlusOutlined />} onClick={() => setCollectionEditor({ creating: true })}>
+            New collection
+          </Button>
+        </div>
+      )}
+      {scopedCollections.length === 0 ? (
+        <Empty description="No collections yet." />
+      ) : (
         <Row gutter={[12, 12]}>
-          {visibleModels.map(m => {
-            const sch = schemeTag[m.scheme] ?? { color: 'default', label: m.scheme };
+          {scopedCollections.map(c => {
+            const count = scopedModels.filter(m => m.collectionId === c.id).length;
             return (
-              <Col xs={24} md={12} xl={8} key={m.id}>
+              <Col xs={24} md={12} xl={8} key={c.id}>
                 <Card
-                  className="model-card"
                   size="small"
                   hoverable
-                  onClick={() => setDetail(m)}
+                  onClick={() => {
+                    const next = new URLSearchParams(sp);
+                    next.set('tab', 'models');
+                    next.set('collection', c.id);
+                    setSp(next);
+                  }}
+                  styles={{ body: { minHeight: 120 } }}
                   title={
-                    <Space direction="vertical" size={0} style={{ width: '100%' }}>
-                      <Space size={6}>
-                        <span style={{ fontWeight: 600 }}>{m.name}</span>
-                        <Tag color="blue">{m.modelType}</Tag>
-                        <Tag color={sch.color}>{sch.label}</Tag>
-                      </Space>
-                      <span className="knaic-sub mono" style={{ fontSize: 11 }}>
-                        {m.uri}
-                      </span>
+                    <Space>
+                      <AppstoreOutlined style={{ color: c.iconColor ?? token.colorPrimary }} />
+                      <Typography.Text strong>{c.name}</Typography.Text>
+                      <Tag>{count} models</Tag>
                     </Space>
                   }
-                  styles={{ body: { minHeight: 140 } }}
-                  actions={[
-                    <Button
-                      key="publish"
-                      type="link"
-                      icon={<RocketOutlined />}
-                      onClick={e => {
-                        e.stopPropagation();
-                        openPublish(m);
-                      }}
-                    >
-                      Publish
-                    </Button>,
-                    <Button
-                      key="download"
-                      type="link"
-                      icon={<DownloadOutlined />}
-                      onClick={e => {
-                        e.stopPropagation();
-                        updateModel(m.id, { downloads: m.downloads + 1 }).catch(err => message.error(err.message));
-                        message.success(`Downloading ${m.name} …`);
-                      }}
-                    >
-                      Download
-                    </Button>,
-                    ...(canWrite
+                  actions={
+                    canWrite
                       ? [
+                          <Button
+                            key="edit"
+                            type="link"
+                            icon={<EditOutlined />}
+                            onClick={e => {
+                              e.stopPropagation();
+                              setCollectionEditor(c);
+                            }}
+                          >
+                            Edit
+                          </Button>,
                           <Button
                             key="delete"
                             type="link"
@@ -312,13 +475,18 @@ export function ModelHub() {
                             onClick={e => {
                               e.stopPropagation();
                               modal.confirm({
-                                title: `Delete ${m.name}?`,
+                                title: `Delete collection "${c.name}"?`,
+                                content:
+                                  count > 0
+                                    ? `${count} model(s) reference this collection and will lose the link.`
+                                    : undefined,
                                 onOk: async () => {
                                   try {
-                                    await deleteModel(m.id);
-                                    message.success('Model deleted');
-                                  } catch (err) {
-                                    message.error((err as Error).message);
+                                    await deleteCollection(c.id);
+                                    removeCollectionLocal(c.id);
+                                    message.success('Collection deleted');
+                                  } catch (e) {
+                                    message.error((e as Error).message);
                                   }
                                 },
                               });
@@ -327,29 +495,111 @@ export function ModelHub() {
                             Delete
                           </Button>,
                         ]
-                      : []),
-                  ]}
+                      : undefined
+                  }
                 >
-                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                    <Space wrap size={4}>
-                      {m.tags.map(t => (
-                        <Tag key={t}>{t}</Tag>
-                      ))}
-                    </Space>
-                    <Space size={16} className="knaic-sub" wrap>
-                      <span>Size: {m.sizeGB.toFixed(1)} GiB</span>
-                      <span>Downloads: {m.downloads}</span>
-                      <span>Created: {m.createdAt}</span>
-                      <span>Updated: {m.updatedAt}</span>
-                    </Space>
-                  </Space>
+                  <Typography.Paragraph type="secondary" ellipsis={{ rows: 3 }} style={{ marginBottom: 0 }}>
+                    {c.description || '—'}
+                  </Typography.Paragraph>
                 </Card>
               </Col>
             );
           })}
         </Row>
       )}
+    </>
+  );
 
+  return (
+    <div className="knaic-page">
+      <PageHeader
+        title={
+          actualScope === 'public' ? (
+            <>
+              <GlobalOutlined /> Model Catalog
+            </>
+          ) : (
+            <>
+              <LockOutlined /> Private Models · {namespace}
+            </>
+          )
+        }
+        description={
+          actualScope === 'public'
+            ? 'Public models curated by platform admins. Other users can request to publish their private models here.'
+            : `Private models scoped to namespace ${namespace}.`
+        }
+        extra={
+          <Space wrap>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => {
+                reloadModels(actualScope, actualScope === 'private' ? namespace : undefined);
+                reloadCollections(actualScope, actualScope === 'private' ? namespace : undefined);
+              }}
+            >
+              Refresh
+            </Button>
+            {canWrite && (
+              <>
+                <Button icon={<CloudDownloadOutlined />} onClick={() => setImportOpen(true)}>
+                  Import from URL
+                </Button>
+                {actualScope === 'private' && (
+                  <Button
+                    icon={<UploadOutlined />}
+                    onClick={() => {
+                      uploadForm.resetFields();
+                      setUploadOpen(true);
+                    }}
+                  >
+                    Upload from local disk
+                  </Button>
+                )}
+                <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+                  Register model
+                </Button>
+              </>
+            )}
+          </Space>
+        }
+      />
+
+      <Tabs
+        activeKey={activeTab}
+        onChange={key => {
+          const next = new URLSearchParams(sp);
+          if (key === 'models') {
+            next.delete('tab');
+          } else {
+            next.set('tab', key);
+            next.delete('collection');
+          }
+          setSp(next);
+        }}
+        items={[
+          {
+            key: 'models',
+            label: (
+              <span>
+                <FolderOpenOutlined /> Models
+              </span>
+            ),
+            children: renderModelsList(),
+          },
+          {
+            key: 'collections',
+            label: (
+              <span>
+                <AppstoreOutlined /> Collections
+              </span>
+            ),
+            children: renderCollectionsTab(),
+          },
+        ]}
+      />
+
+      {/* Register URI modal */}
       <Modal
         open={createOpen}
         title="Register model"
@@ -359,7 +609,7 @@ export function ModelHub() {
           const v = await form.validateFields();
           const scheme = parseUri(v.uri);
           if (!scheme) {
-            message.error('Unsupported URI scheme. Use hf:// hf-mirror:// modelscope:// s3:// or oci://');
+            message.error('Unsupported URI scheme. Use hf:// hf-mirror:// hf-local:// modelscope:// s3:// oci:// or gitlab://');
             return;
           }
           try {
@@ -374,6 +624,7 @@ export function ModelHub() {
               modelType: v.modelType ?? 'llm',
               sizeGB: v.sizeGB ?? 0,
               readme: v.readme ?? `# ${v.name}\n\n_Registered via knaic._`,
+              collectionId: v.collectionId,
             });
             setCreateOpen(false);
             form.resetFields();
@@ -391,14 +642,13 @@ export function ModelHub() {
             <Input placeholder="hf-mirror://Qwen/Qwen3.5-7B-Instruct or s3://bucket/path/" />
           </Form.Item>
           <Form.Item name="modelType" label="Type" initialValue="llm">
+            <Select options={MODEL_TYPE_OPTIONS.map(o => ({ label: o.label, value: o.id }))} />
+          </Form.Item>
+          <Form.Item name="collectionId" label="Collection">
             <Select
-              options={[
-                { label: 'llm', value: 'llm' },
-                { label: 'embedding', value: 'embedding' },
-                { label: 'classifier', value: 'classifier' },
-                { label: 'diffusion', value: 'diffusion' },
-                { label: 'other', value: 'other' },
-              ]}
+              allowClear
+              placeholder="Group with an existing collection (optional)"
+              options={scopedCollections.map(c => ({ label: c.name, value: c.id }))}
             />
           </Form.Item>
           <Form.Item name="tags" label="Tags">
@@ -413,6 +663,7 @@ export function ModelHub() {
         </Form>
       </Modal>
 
+      {/* Import from URL */}
       <Modal
         open={importOpen}
         title="Import model from URL"
@@ -444,6 +695,7 @@ export function ModelHub() {
         </Form>
       </Modal>
 
+      {/* Upload from local disk */}
       <Modal
         open={uploadOpen}
         title="Upload model from local disk"
@@ -493,15 +745,7 @@ export function ModelHub() {
             />
           </Form.Item>
           <Form.Item name="modelType" label="Type">
-            <Select
-              options={[
-                { label: 'llm', value: 'llm' },
-                { label: 'embedding', value: 'embedding' },
-                { label: 'classifier', value: 'classifier' },
-                { label: 'diffusion', value: 'diffusion' },
-                { label: 'other', value: 'other' },
-              ]}
-            />
+            <Select options={MODEL_TYPE_OPTIONS.map(o => ({ label: o.label, value: o.id }))} />
           </Form.Item>
           <Form.Item name="sizeGB" label="Size (GiB)">
             <InputNumber min={0} step={0.1} style={{ width: '100%' }} />
@@ -516,6 +760,72 @@ export function ModelHub() {
         </Form>
       </Modal>
 
+      {/* Collection editor */}
+      <Modal
+        open={!!collectionEditor}
+        title={
+          collectionEditor && 'creating' in collectionEditor
+            ? 'New collection'
+            : collectionEditor
+              ? `Edit collection ${(collectionEditor as CollectionDTO).name}`
+              : ''
+        }
+        onCancel={() => setCollectionEditor(null)}
+        destroyOnClose
+        afterOpenChange={open => {
+          if (open && collectionEditor) {
+            if ('creating' in collectionEditor) {
+              collectionForm.setFieldsValue({ name: '', description: '', iconColor: '' });
+            } else {
+              collectionForm.setFieldsValue({
+                name: collectionEditor.name,
+                description: collectionEditor.description,
+                iconColor: collectionEditor.iconColor,
+              });
+            }
+          }
+        }}
+        onOk={async () => {
+          const v = await collectionForm.validateFields();
+          try {
+            if (collectionEditor && 'creating' in collectionEditor) {
+              const created = await createCollection({
+                name: v.name,
+                scope: actualScope,
+                namespace: actualScope === 'private' ? namespace : undefined,
+                description: v.description,
+                iconColor: v.iconColor,
+              });
+              upsertCollectionLocal(created);
+              message.success('Collection created');
+            } else if (collectionEditor) {
+              const updated = await patchCollection(collectionEditor.id, {
+                name: v.name,
+                description: v.description,
+                iconColor: v.iconColor,
+              });
+              upsertCollectionLocal(updated);
+              message.success('Collection updated');
+            }
+            setCollectionEditor(null);
+          } catch (e) {
+            message.error((e as Error).message);
+          }
+        }}
+      >
+        <Form form={collectionForm} layout="vertical" preserve={false}>
+          <Form.Item name="name" label="Name" rules={[{ required: true }]}>
+            <Input placeholder="Qwen3.5" />
+          </Form.Item>
+          <Form.Item name="description" label="Description">
+            <Input.TextArea rows={3} placeholder="What models live in this collection?" />
+          </Form.Item>
+          <Form.Item name="iconColor" label="Accent color (hex)">
+            <Input placeholder="#722ED1" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
       <NewInferenceServiceModal
         open={!!publishModel}
         namespace={namespace}
@@ -526,66 +836,15 @@ export function ModelHub() {
         onCreated={() => nav('/inference/services')}
       />
 
-      <Drawer
-        open={!!detail}
-        onClose={() => setDetail(null)}
-        title={detail?.name}
-        width={720}
-        destroyOnClose
-        extra={
-          detail && (
-            <Button
-              type="primary"
-              icon={<RocketOutlined />}
-              onClick={() => {
-                setDetail(null);
-                openPublish(detail);
-              }}
-            >
-              Publish
-            </Button>
-          )
-        }
-      >
-        {detail && (
-          <Tabs
-            items={[
-              {
-                key: 'readme',
-                label: 'README',
-                children: (
-                  <div style={{ lineHeight: 1.7 }}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{detail.readme}</ReactMarkdown>
-                  </div>
-                ),
-              },
-              {
-                key: 'meta',
-                label: 'Metadata',
-                children: (
-                  <div className="knaic-kv">
-                    <div className="k">Owner</div><div>{detail.owner}</div>
-                    <div className="k">Scope</div><div>{detail.scope}</div>
-                    <div className="k">Namespace</div><div>{detail.namespace ?? '—'}</div>
-                    <div className="k">Storage URI</div><div className="mono">{detail.uri}</div>
-                    <div className="k">Type</div><div>{detail.modelType}</div>
-                    <div className="k">Tags</div>
-                    <div>
-                      <Space wrap>
-                        {detail.tags.map(t => <Tag key={t}>{t}</Tag>)}
-                      </Space>
-                    </div>
-                    <div className="k">Size</div><div>{detail.sizeGB.toFixed(1)} GiB</div>
-                    <div className="k">Downloads</div><div>{detail.downloads}</div>
-                    <div className="k">Created</div><div>{detail.createdAt}</div>
-                    <div className="k">Updated</div><div>{detail.updatedAt}</div>
-                  </div>
-                ),
-              },
-            ]}
-          />
-        )}
-      </Drawer>
+      <PublishRequestModal
+        open={!!publishToCatalog}
+        model={publishToCatalog}
+        onClose={() => setPublishToCatalog(null)}
+        onCreated={() => {
+          setPublishToCatalog(null);
+          message.success('Publish request submitted; an admin will review.');
+        }}
+      />
     </div>
   );
 }

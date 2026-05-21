@@ -152,6 +152,22 @@ func init() {
 		Namespaced: true,
 		Project:    projectLLMInferenceServiceConfig,
 	})
+	// KServe local model cache CRDs (cluster-scoped). The DaemonSet
+	// `kserve-localmodelnode-agent` watches LocalModelCaches and pre-downloads
+	// model blobs into the node-local hostPath defined by the NodeGroup's
+	// persistentVolumeSpec.local.path.
+	register(Kind{
+		Slug:       "localmodelnodegroups",
+		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha1", Resource: "localmodelnodegroups"},
+		Namespaced: false,
+		Project:    projectLocalModelNodeGroup,
+	})
+	register(Kind{
+		Slug:       "localmodelcaches",
+		GVR:        schema.GroupVersionResource{Group: "serving.kserve.io", Version: "v1alpha1", Resource: "localmodelcaches"},
+		Namespaced: false,
+		Project:    projectLocalModelCache,
+	})
 	register(Kind{
 		Slug:       "notebooks",
 		GVR:        schema.GroupVersionResource{Group: "kubeflow.org", Version: "v1", Resource: "notebooks"},

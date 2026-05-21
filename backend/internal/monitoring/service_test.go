@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alauda/knaic-backend/internal/auth"
+	"github.com/knaic/knaic-backend/internal/auth"
 )
 
 func TestPromQLAddsNamespaceTargetForUsage(t *testing.T) {
