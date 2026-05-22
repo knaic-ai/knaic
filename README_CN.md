@@ -4,7 +4,7 @@
 > 已经在用的主流开源 MLOps 组件之上 —— KServe、Kubeflow、Volcano、
 > MLflow、Prometheus。
 
-[English](./README.md) · [简体中文](./README_CN.md)
+[English](./README.md) · [简体中文](./README_CN.md) · [企业版](https://www.alauda.io/)
 
 knaic 把企业内部 AI 平台的日常工作流 —— 模型仓库、推理服务、Notebook、
 训练任务、监控、对话 Playground、以及每用户独享的 Agent 工作空间 —— 收

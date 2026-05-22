@@ -4,7 +4,7 @@
 > node. A console built on top of the popular open-source MLOps components
 > you already trust — KServe, Kubeflow, Volcano, MLflow, Prometheus.
 
-[English](./README.md) · [简体中文](./README_CN.md)
+[English](./README.md) · [简体中文](./README_CN.md) · [Enterprise](https://www.alauda.io/)
 
 knaic packs the day-to-day workflow of an internal AI platform — model hub,
 inference, notebooks, training, monitoring, a chat playground, and a per-user
